@@ -1,8 +1,16 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { SearchResponse, TenderMatch } from "../../shared/tender";
 
 const exampleSpecification =
   "We deliver secure cloud software, workflow automation, CRM integration, data migration, analytics dashboards, and support for public sector health and local government teams.";
+
+type MatchFilter = "all" | "high" | "medium" | "active";
+type SortMode = "match" | "value" | "deadline";
+
+const CIRCLE_RADIUS = 20;
+const CIRCLE_CIRCUMFERENCE = 2 * Math.PI * CIRCLE_RADIUS;
+const PAGE_SIZE = 25;
 
 function formatCurrency(value: number, currency: string): string {
   if (value <= 0) {
@@ -46,171 +54,314 @@ function daysUntil(value: string): number | null {
   return Math.ceil((deadline.getTime() - today.getTime()) / 86_400_000);
 }
 
-function deadlineTone(days: number | null): string {
+function deadlineStyles(days: number | null): { label: string; className: string } {
   if (days === null) {
-    return "border-slate-300 bg-slate-50 text-slate-700";
-  }
-
-  if (days <= 7) {
-    return "border-signal bg-orange-50 text-signal";
-  }
-
-  if (days <= 21) {
-    return "border-amber-400 bg-amber-50 text-amber-800";
-  }
-
-  return "border-moss bg-mist text-moss";
-}
-
-function deadlineLabel(days: number | null): string {
-  if (days === null) {
-    return "Deadline not specified";
+    return {
+      label: "Deadline not specified",
+      className: "border-[#e1e5e2] bg-[#eef0f1] text-[#525a60]"
+    };
   }
 
   if (days < 0) {
-    return "Deadline passed";
+    return {
+      label: "Deadline passed",
+      className: "border-[#f4cbc6] bg-[#fdeceb] text-[#b42318]"
+    };
   }
 
-  if (days === 0) {
-    return "Due today";
+  if (days <= 14) {
+    return {
+      label: days === 0 ? "Due today" : `${days} days left`,
+      className: "border-[#eedcb2] bg-[#fbf1de] text-[#8a560f]"
+    };
   }
 
-  if (days === 1) {
-    return "Due tomorrow";
-  }
-
-  return `${days} days left`;
+  return {
+    label: `${days} days left`,
+    className: "border-[#c8e3d4] bg-[#e6f2ea] text-[#15643f]"
+  };
 }
 
-function matchTone(tender: TenderMatch): string {
+function matchPalette(tender: TenderMatch): {
+  label: string;
+  shortLabel: string;
+  ring: string;
+  badgeClassName: string;
+} {
   if (tender.embeddingStatus === "pending") {
-    return "border-slate-300 bg-slate-50 text-slate-600";
+    return {
+      label: "Embedding",
+      shortLabel: "PENDING",
+      ring: "#909a93",
+      badgeClassName: "bg-[#eef0f1] text-[#525a60]"
+    };
   }
 
   if (tender.embeddingStatus === "failed") {
-    return "border-signal bg-orange-50 text-signal";
+    return {
+      label: "Embedding failed",
+      shortLabel: "FAILED",
+      ring: "#b42318",
+      badgeClassName: "bg-[#fdeceb] text-[#b42318]"
+    };
   }
 
-  const { matchQuality: quality } = tender;
-
-  if (quality === "high") {
-    return "border-moss bg-mist text-moss";
+  if (tender.matchQuality === "high") {
+    return {
+      label: "Strong match",
+      shortLabel: "STRONG",
+      ring: "#1f7a4d",
+      badgeClassName: "bg-[#e6f2ea] text-[#15643f]"
+    };
   }
 
-  if (quality === "medium") {
-    return "border-amber-400 bg-amber-50 text-amber-800";
+  if (tender.matchQuality === "medium") {
+    return {
+      label: "Possible match",
+      shortLabel: "POSSIBLE",
+      ring: "#b07315",
+      badgeClassName: "bg-[#fbf1de] text-[#8a560f]"
+    };
   }
 
-  return "border-slate-300 bg-slate-50 text-slate-700";
+  return {
+    label: "Low match",
+    shortLabel: "LOW",
+    ring: "#909a93",
+    badgeClassName: "bg-[#eef0f1] text-[#525a60]"
+  };
 }
 
-function formatMatchScore(tender: TenderMatch): string {
-  if (tender.embeddingStatus === "pending") {
-    return "- (0%)";
+function effectiveEmbeddingStatus(tender: TenderMatch, isEmbedding: boolean): TenderMatch["embeddingStatus"] {
+  if (tender.embeddingStatus === "pending" && !isEmbedding) {
+    return "failed";
   }
 
-  if (tender.embeddingStatus === "failed") {
-    return "Failed";
-  }
-
-  const { matchScore: score } = tender;
-  return `${Math.round(score * 100)}%`;
+  return tender.embeddingStatus;
 }
 
-function matchLabel(tender: TenderMatch): string {
-  if (tender.embeddingStatus === "pending") {
-    return "Embedding";
+function matchPercent(tender: TenderMatch): number {
+  if (tender.embeddingStatus !== "ready") {
+    return 0;
   }
 
-  if (tender.embeddingStatus === "failed") {
-    return "Embedding failed";
-  }
-
-  return `${tender.matchQuality} match`;
+  return Math.max(0, Math.min(100, Math.round(tender.matchScore * 100)));
 }
 
-function TenderCard({ tender }: { tender: TenderMatch }) {
-  const days = daysUntil(tender.deadlineDate);
-  const strictWarning = days !== null && days <= 7 && days >= 0;
+function matchDisplay(tender: TenderMatch, isEmbedding: boolean): string {
+  const status = effectiveEmbeddingStatus(tender, isEmbedding);
+
+  if (status === "pending") {
+    return "-";
+  }
+
+  if (status === "failed") {
+    return "!";
+  }
+
+  return String(matchPercent(tender));
+}
+
+function compareByDeadline(left: TenderMatch, right: TenderMatch): number {
+  const leftTime = Date.parse(left.deadlineDate);
+  const rightTime = Date.parse(right.deadlineDate);
+
+  return (Number.isFinite(leftTime) ? leftTime : Number.MAX_SAFE_INTEGER) -
+    (Number.isFinite(rightTime) ? rightTime : Number.MAX_SAFE_INTEGER);
+}
+
+function filterTenders(tenders: TenderMatch[], filter: MatchFilter): TenderMatch[] {
+  if (filter === "active") {
+    return tenders.filter((tender) => tender.status === "active");
+  }
+
+  if (filter === "high" || filter === "medium") {
+    return tenders.filter((tender) => tender.embeddingStatus === "ready" && tender.matchQuality === filter);
+  }
+
+  return tenders;
+}
+
+function sortTenders(tenders: TenderMatch[], sort: SortMode): TenderMatch[] {
+  return [...tenders].sort((left, right) => {
+    if (sort === "value") {
+      return right.value - left.value;
+    }
+
+    if (sort === "deadline") {
+      return compareByDeadline(left, right);
+    }
+
+    if (left.embeddingStatus === "ready" && right.embeddingStatus !== "ready") {
+      return -1;
+    }
+
+    if (left.embeddingStatus !== "ready" && right.embeddingStatus === "ready") {
+      return 1;
+    }
+
+    if (right.matchScore !== left.matchScore) {
+      return right.matchScore - left.matchScore;
+    }
+
+    return compareByDeadline(left, right);
+  });
+}
+
+function Spinner({ dark = false }: { dark?: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={`h-4 w-4 animate-spin rounded-full border-2 border-t-transparent ${
+        dark ? "border-[#1f7a4d]" : "border-white"
+      }`}
+    />
+  );
+}
+
+function FilterButton({
+  active,
+  children,
+  onClick
+}: {
+  active: boolean;
+  children: ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`rounded-lg border px-3.5 py-1.5 text-[12.5px] font-semibold transition ${
+        active
+          ? "border-[#1f7a4d] bg-[#1f7a4d] text-white"
+          : "border-[#e1e5e2] bg-white text-[#525a60] hover:border-[#c8e3d4] hover:text-[#13201a]"
+      }`}
+      onClick={onClick}
+      type="button"
+    >
+      {children}
+    </button>
+  );
+}
+
+function MatchRing({ isEmbedding, tender }: { isEmbedding: boolean; tender: TenderMatch }) {
+  const effectiveTender = {
+    ...tender,
+    embeddingStatus: effectiveEmbeddingStatus(tender, isEmbedding)
+  };
+  const palette = matchPalette(effectiveTender);
+  const percent = matchPercent(effectiveTender);
+  const dash = CIRCLE_CIRCUMFERENCE * (1 - percent / 100);
 
   return (
-    <details className="group overflow-hidden rounded-lg border border-line bg-white shadow-lift">
-      <summary className="grid cursor-pointer gap-4 p-5 md:grid-cols-[1fr_auto] md:items-start">
+    <div className="relative h-[62px] w-[62px]">
+      <svg className="-rotate-90" height="62" viewBox="0 0 56 56" width="62">
+        <circle cx="28" cy="28" fill="none" r={CIRCLE_RADIUS} stroke="#edf0ee" strokeWidth="5" />
+        <circle
+          cx="28"
+          cy="28"
+          fill="none"
+          r={CIRCLE_RADIUS}
+          stroke={palette.ring}
+          strokeDasharray={CIRCLE_CIRCUMFERENCE}
+          strokeDashoffset={dash}
+          strokeLinecap="round"
+          strokeWidth="5"
+        />
+      </svg>
+      <div
+        className="absolute inset-0 flex items-center justify-center text-[15px] font-extrabold"
+        style={{ color: palette.ring }}
+      >
+        {effectiveTender.embeddingStatus === "pending" ? <Spinner dark /> : matchDisplay(effectiveTender, isEmbedding)}
+      </div>
+    </div>
+  );
+}
+
+function TenderCard({ isEmbedding, tender }: { isEmbedding: boolean; tender: TenderMatch }) {
+  const effectiveTender = {
+    ...tender,
+    embeddingStatus: effectiveEmbeddingStatus(tender, isEmbedding)
+  };
+  const days = daysUntil(tender.deadlineDate);
+  const deadline = deadlineStyles(days);
+  const match = matchPalette(effectiveTender);
+
+  return (
+    <details className="group rounded-2xl border border-[#e4e7e5] bg-white px-6 py-5 shadow-[0_1px_2px_rgba(16,28,22,0.04)] transition hover:border-[#cfe0d6] hover:shadow-[0_4px_16px_rgba(16,28,22,0.07)]">
+      <summary className="grid cursor-pointer list-none gap-5 md:grid-cols-[minmax(0,1fr)_172px] md:gap-7">
         <div className="min-w-0">
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            <span className="rounded border border-line px-2 py-1 text-xs font-semibold uppercase tracking-normal text-slate-600">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <span className="rounded-md border border-[#e1e5e2] px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.06em] text-[#6a746e]">
               {tender.status}
             </span>
-            <span className={`rounded border px-2 py-1 text-xs font-semibold ${deadlineTone(days)}`}>
-              {deadlineLabel(days)}
+            <span className={`rounded-md border px-2.5 py-1 text-[11.5px] font-semibold ${deadline.className}`}>
+              {deadline.label}
             </span>
             <span
-              className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs font-semibold ${matchTone(tender)}`}
+              className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11.5px] font-bold ${match.badgeClassName}`}
             >
-              {tender.embeddingStatus === "pending" ? (
-                <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              ) : null}
-              {matchLabel(tender)}
+              {effectiveTender.embeddingStatus === "pending" ? <Spinner dark /> : null}
+              {match.label}
             </span>
           </div>
-          <h2 className="text-lg font-semibold leading-snug text-ink">{tender.title}</h2>
-          <p className="mt-2 text-sm font-medium text-slate-700">{tender.buyerName}</p>
-          <p className="mt-3 line-clamp-3 text-sm leading-6 text-slate-600">{tender.description}</p>
+
+          <h2 className="m-0 text-[19px] font-bold leading-snug text-[#13201a]">{tender.title}</h2>
+          <div className="mt-2 text-[13.5px] font-semibold text-[#1f7a4d]">{tender.buyerName}</div>
+          <p className="mt-3 line-clamp-2 text-[13.5px] leading-relaxed text-[#5c655f]">{tender.description}</p>
         </div>
-        <div className="grid gap-2 text-left md:min-w-48 md:text-right">
-          <span className="text-sm text-slate-500">Estimated value</span>
-          <span className="text-lg font-semibold text-ink">
-            {formatCurrency(tender.value, tender.currency)}
-          </span>
-          <span className="text-sm font-semibold text-moss">
-            {formatMatchScore(tender)} match quality
-          </span>
-          <span className="text-sm text-slate-500">{formatDate(tender.deadlineDate)}</span>
+
+        <div className="border-t border-[#eef1ef] pt-5 text-left md:border-l md:border-t-0 md:pl-6 md:pt-0 md:text-right">
+          <div className="flex flex-col items-start md:items-end">
+            <MatchRing isEmbedding={isEmbedding} tender={effectiveTender} />
+            <div className="mt-1.5 text-[11px] tracking-[0.02em] text-[#8a938c]">match quality</div>
+            <div className="mt-5 text-[11px] uppercase tracking-[0.04em] text-[#8a938c]">Estimated value</div>
+            <div className="mt-1 text-[17px] font-extrabold text-[#13201a]">
+              {formatCurrency(tender.value, tender.currency)}
+            </div>
+            <div className="mt-2.5 text-xs text-[#8a938c]">Closes {formatDate(tender.deadlineDate)}</div>
+          </div>
         </div>
       </summary>
 
-      <div className="border-t border-line px-5 py-5">
-        {strictWarning ? (
-          <div className="mb-5 rounded-md border border-signal bg-orange-50 px-4 py-3 text-sm font-semibold text-signal">
-            Strict deadline warning: this tender closes within 7 days.
-          </div>
-        ) : null}
-
+      <div className="mt-5 border-t border-[#eef1ef] pt-5">
         <dl className="grid gap-4 text-sm md:grid-cols-2">
           <div>
-            <dt className="font-semibold text-slate-500">Publication date</dt>
-            <dd className="mt-1 text-ink">{formatDate(tender.publicationDate)}</dd>
+            <dt className="font-semibold text-[#6a746e]">Publication date</dt>
+            <dd className="mt-1 text-[#13201a]">{formatDate(tender.publicationDate)}</dd>
           </div>
           <div>
-            <dt className="font-semibold text-slate-500">Deadline date</dt>
-            <dd className="mt-1 text-ink">{formatDate(tender.deadlineDate)}</dd>
+            <dt className="font-semibold text-[#6a746e]">Deadline date</dt>
+            <dd className="mt-1 text-[#13201a]">{formatDate(tender.deadlineDate)}</dd>
           </div>
           <div>
-            <dt className="font-semibold text-slate-500">Cosine match score</dt>
-            <dd className="mt-1 text-ink">{formatMatchScore(tender)}</dd>
+            <dt className="font-semibold text-[#6a746e]">Cosine match score</dt>
+            <dd className="mt-1 text-[#13201a]">
+              {effectiveTender.embeddingStatus === "ready" ? `${matchPercent(effectiveTender)}%` : "- (0%)"}
+            </dd>
           </div>
           <div>
-            <dt className="font-semibold text-slate-500">Embedding status</dt>
-            <dd className="mt-1 capitalize text-ink">{tender.embeddingStatus}</dd>
+            <dt className="font-semibold text-[#6a746e]">Embedding status</dt>
+            <dd className="mt-1 capitalize text-[#13201a]">{effectiveTender.embeddingStatus}</dd>
           </div>
           <div>
-            <dt className="font-semibold text-slate-500">Buyer</dt>
-            <dd className="mt-1 text-ink">{tender.buyerName}</dd>
+            <dt className="font-semibold text-[#6a746e]">Buyer</dt>
+            <dd className="mt-1 text-[#13201a]">{tender.buyerName}</dd>
           </div>
           <div>
-            <dt className="font-semibold text-slate-500">Tender ID</dt>
-            <dd className="mt-1 break-all text-ink">{tender.id}</dd>
+            <dt className="font-semibold text-[#6a746e]">Tender ID</dt>
+            <dd className="mt-1 break-all text-[#13201a]">{tender.id}</dd>
           </div>
         </dl>
 
         <div className="mt-5">
-          <h3 className="text-sm font-semibold text-slate-500">Documentation</h3>
+          <h3 className="text-sm font-semibold text-[#6a746e]">Documentation</h3>
           {tender.documentationUrls.length > 0 ? (
             <ul className="mt-2 grid gap-2">
               {tender.documentationUrls.map((url) => (
                 <li key={url}>
                   <a
-                    className="inline-flex max-w-full items-center rounded-md border border-line px-3 py-2 text-sm font-semibold text-moss transition hover:border-moss hover:bg-mist"
+                    className="inline-flex max-w-full rounded-lg border border-[#e1e5e2] px-3 py-2 text-sm font-semibold text-[#1f7a4d] transition hover:border-[#c8e3d4] hover:bg-[#eef4f0]"
                     href={url}
                     rel="noreferrer"
                     target="_blank"
@@ -221,25 +372,16 @@ function TenderCard({ tender }: { tender: TenderMatch }) {
               ))}
             </ul>
           ) : (
-            <p className="mt-2 text-sm text-slate-600">No direct documentation links were published.</p>
+            <p className="mt-2 text-sm text-[#5c655f]">No direct documentation links were published.</p>
           )}
         </div>
 
         <div className="mt-5">
-          <h3 className="text-sm font-semibold text-slate-500">Complete scope text</h3>
-          <p className="mt-2 whitespace-pre-line text-sm leading-6 text-slate-700">{tender.description}</p>
+          <h3 className="text-sm font-semibold text-[#6a746e]">Complete scope text</h3>
+          <p className="mt-2 whitespace-pre-line text-sm leading-6 text-[#5c655f]">{tender.description}</p>
         </div>
       </div>
     </details>
-  );
-}
-
-function Spinner() {
-  return (
-    <span
-      aria-hidden="true"
-      className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"
-    />
   );
 }
 
@@ -248,9 +390,82 @@ export default function App() {
   const [results, setResults] = useState<SearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [filter, setFilter] = useState<MatchFilter>("all");
+  const [sort, setSort] = useState<SortMode>("match");
+  const [page, setPage] = useState(1);
+  const [pageInput, setPageInput] = useState("1");
+  const [hideExpired, setHideExpired] = useState(false);
+  const resultsTopRef = useRef<HTMLDivElement | null>(null);
 
-  const rankedTenders = useMemo(() => results?.tenders ?? [], [results]);
+  const filteredAndSortedTenders = useMemo(() => {
+    const unexpiredTenders = hideExpired
+      ? (results?.tenders ?? []).filter((tender) => {
+          const days = daysUntil(tender.deadlineDate);
+
+          return days === null || days >= 0;
+        })
+      : (results?.tenders ?? []);
+
+    return sortTenders(filterTenders(unexpiredTenders, filter), sort);
+  }, [filter, hideExpired, results, sort]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredAndSortedTenders.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const rankedTenders = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+
+    return filteredAndSortedTenders.slice(start, start + PAGE_SIZE);
+  }, [currentPage, filteredAndSortedTenders]);
+
+  const counts = useMemo(() => {
+    const tenders = results?.tenders ?? [];
+
+    return {
+      all: tenders.length,
+      high: tenders.filter((tender) => tender.embeddingStatus === "ready" && tender.matchQuality === "high").length,
+      medium: tenders.filter((tender) => tender.embeddingStatus === "ready" && tender.matchQuality === "medium")
+        .length,
+      active: tenders.filter((tender) => tender.status === "active").length
+    };
+  }, [results]);
+
   const isEmbedding = results?.status === "processing";
+  const strongCount = counts.high;
+
+  useEffect(() => {
+    setPage(1);
+  }, [filter, hideExpired, results?.searchId, sort]);
+
+  useEffect(() => {
+    setPageInput(String(currentPage));
+  }, [currentPage]);
+
+  function scrollResultsToTop(): void {
+    resultsTopRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "start"
+    });
+  }
+
+  function changePage(nextPage: number): void {
+    const boundedPage = Math.min(Math.max(nextPage, 1), totalPages);
+
+    setPage(boundedPage);
+    window.setTimeout(scrollResultsToTop, 0);
+  }
+
+  function handlePageInputSubmit(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault();
+
+    const parsed = Number(pageInput);
+
+    if (!Number.isFinite(parsed)) {
+      setPageInput(String(currentPage));
+      return;
+    }
+
+    changePage(Math.trunc(parsed));
+  }
 
   useEffect(() => {
     if (!results || results.status !== "processing") {
@@ -293,6 +508,9 @@ export default function App() {
     event.preventDefault();
     setError(null);
     setIsLoading(true);
+    setFilter("all");
+    setSort("match");
+    setPage(1);
 
     try {
       const response = await fetch("/api/search", {
@@ -319,148 +537,266 @@ export default function App() {
   }
 
   return (
-    <main className="min-h-screen bg-[#F8FAF8]">
-      <section className="border-b border-line bg-white">
-        <div className="mx-auto grid max-w-7xl gap-8 px-5 py-8 lg:grid-cols-[minmax(0,1fr)_22rem] lg:px-8">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-normal text-moss">Tender discovery</p>
-            <h1 className="mt-3 max-w-3xl text-3xl font-semibold leading-tight text-ink md:text-5xl">
+    <main className="min-h-screen bg-[#eceeed] text-[#13201a]">
+      <div className="sticky top-0 z-50 bg-[#0f1c16] shadow-[0_1px_0_rgba(255,255,255,0.06)]">
+        <div className="mx-auto flex max-w-[1320px] items-center gap-6 px-5 py-3 sm:px-8 xl:px-12">
+          <div className="flex items-center gap-3">
+            <div className="grid h-[22px] w-[22px] place-items-center rounded-md bg-[#1f7a4d] text-xs font-extrabold text-white">
+              T
+            </div>
+            <span className="text-sm font-bold tracking-[0.01em] text-white">Tender Discovery</span>
+          </div>
+          <span className="hidden text-[12.5px] font-medium text-white/40 sm:inline">
+            refined opportunity console
+          </span>
+        </div>
+      </div>
+
+      <div className="mx-auto max-w-[1320px] px-5 py-10 sm:px-8 xl:px-12 xl:py-11">
+        <header className="mb-10 flex flex-col justify-between gap-8 lg:flex-row lg:items-start">
+          <div className="max-w-[740px]">
+            <p className="mb-4 text-[12.5px] font-bold uppercase tracking-[0.16em] text-[#1f7a4d]">
+              Tender Discovery
+            </p>
+            <h1 className="m-0 max-w-3xl text-4xl font-extrabold leading-[1.05] tracking-normal text-[#13201a] md:text-[52px]">
               Match your business profile to public sector opportunities
             </h1>
           </div>
-          <div className="grid gap-3 self-end rounded-lg border border-line bg-mist p-4">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-sm font-semibold text-slate-600">Source</span>
-              <span className="text-sm font-semibold text-ink">
-                {results?.source === "mock" ? "Mock OCDS fallback" : "Find a Tender OCDS"}
+
+          <div className="w-full rounded-[14px] border border-[#e4e7e5] bg-white px-5 py-1 shadow-[0_1px_2px_rgba(16,28,22,0.04)] lg:w-[268px]">
+            <div className="flex items-center justify-between border-b border-[#eef1ef] py-3.5">
+              <span className="text-[13px] text-[#6a746e]">Source</span>
+              <span className="text-[13px] font-semibold text-[#13201a]">
+                {results?.source === "mock" ? "Mock OCDS" : "Find a Tender OCDS"}
               </span>
             </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-sm font-semibold text-slate-600">Matches</span>
-              <span className="text-sm font-semibold text-ink">{rankedTenders.length}</span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-sm font-semibold text-slate-600">Embedded</span>
-              <span className="text-sm font-semibold text-ink">
+            <div className="flex items-center justify-between border-b border-[#eef1ef] py-3.5">
+              <span className="text-[13px] text-[#6a746e]">Tenders scored</span>
+              <span className="text-[13px] font-semibold text-[#13201a]">
                 {results ? `${results.progress.completed}/${results.progress.total}` : "0/0"}
               </span>
             </div>
+            <div className="flex items-center justify-between py-3.5">
+              <span className="text-[13px] text-[#6a746e]">Visible matches</span>
+              <span className="text-[13px] font-bold text-[#1f7a4d]">{filteredAndSortedTenders.length}</span>
+            </div>
           </div>
-        </div>
-      </section>
+        </header>
 
-      <div className="mx-auto grid max-w-7xl gap-6 px-5 py-6 lg:grid-cols-[24rem_minmax(0,1fr)] lg:px-8">
-        <aside className="lg:sticky lg:top-6 lg:self-start">
-          <form className="rounded-lg border border-line bg-white p-5 shadow-lift" onSubmit={handleSubmit}>
-            <label className="text-sm font-semibold text-ink" htmlFor="business-specification">
-              Business Specification / Profile
-            </label>
-            <textarea
-              className="mt-3 min-h-72 w-full resize-y rounded-md border border-line bg-white p-3 text-sm leading-6 text-ink outline-none transition placeholder:text-slate-400 focus:border-moss focus:ring-4 focus:ring-moss/10"
-              id="business-specification"
-              onChange={(event) => setBusinessSpecification(event.target.value)}
-              placeholder={exampleSpecification}
-              value={businessSpecification}
-            />
-            <button
-              className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md bg-ink px-4 py-3 text-sm font-semibold text-white transition hover:bg-moss disabled:cursor-not-allowed disabled:bg-slate-400"
-              disabled={isLoading}
-              type="submit"
-            >
-              {isLoading ? <Spinner /> : null}
-              {isLoading ? "Searching tenders" : "Find Matching Tenders"}
-            </button>
-          </form>
-
-          {results ? (
-            <div className="mt-4 rounded-lg border border-line bg-white p-5">
-              <h2 className="text-sm font-semibold text-slate-500">Extracted terms</h2>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {results.queryTerms.map((term) => (
+        <div className="grid gap-8 lg:grid-cols-[380px_minmax(0,1fr)]">
+          <aside className="lg:sticky lg:top-[92px] lg:self-start">
+            <div className="flex flex-col gap-[18px]">
+              <form
+                className="rounded-2xl border border-[#e4e7e5] bg-white p-6 shadow-[0_1px_2px_rgba(16,28,22,0.04)]"
+                onSubmit={handleSubmit}
+              >
+                <label className="mb-3.5 block text-[15px] font-bold text-[#13201a]" htmlFor="business-specification">
+                  Business specification
+                </label>
+                <textarea
+                  className="h-[194px] w-full resize-y rounded-[11px] border border-[#dfe3e1] bg-[#fbfcfb] p-3.5 text-[13.5px] leading-relaxed text-[#34403a] outline-none transition placeholder:text-[#9aa1ab] focus:border-[#1f7a4d] focus:ring-4 focus:ring-[#1f7a4d]/10"
+                  id="business-specification"
+                  onChange={(event) => setBusinessSpecification(event.target.value)}
+                  placeholder={exampleSpecification}
+                  value={businessSpecification}
+                />
+                <button
+                  className="mt-3.5 inline-flex w-full items-center justify-center gap-2 rounded-[11px] bg-[#13201a] px-4 py-[13px] text-sm font-semibold tracking-[0.01em] text-white transition hover:bg-[#1f7a4d] disabled:cursor-not-allowed disabled:bg-[#909a93]"
+                  disabled={isLoading}
+                  type="submit"
+                >
+                  {isLoading ? <Spinner /> : null}
+                  {isLoading ? "Fetching tenders" : "Find matching tenders"}
+                </button>
+                <div className="mt-3.5 flex items-center gap-2 text-xs text-[#6a746e]">
                   <span
-                    className="rounded border border-line bg-mist px-2 py-1 text-xs font-semibold text-moss"
-                    key={term}
-                  >
-                    {term}
-                  </span>
+                    className={`h-[7px] w-[7px] flex-none rounded-full ${
+                      isEmbedding ? "animate-pulse bg-[#b07315]" : results ? "bg-[#1f7a4d]" : "bg-[#c5ccc7]"
+                    }`}
+                  />
+                  {results
+                    ? `${results.progress.isBusinessEmbeddingReady ? "Profile embedded" : "Embedding profile"} · ${strongCount} strong matches found`
+                    : "Paste a profile to begin matching"}
+                </div>
+              </form>
+
+              {results ? (
+                <div className="rounded-2xl border border-[#e4e7e5] bg-white p-6 shadow-[0_1px_2px_rgba(16,28,22,0.04)]">
+                  <h2 className="mb-3.5 text-[13px] font-bold text-[#13201a]">Extracted terms</h2>
+                  <div className="flex flex-wrap gap-2">
+                    {results.queryTerms.map((term) => (
+                      <span
+                        className="rounded-md bg-[#eef4f0] px-2.5 py-1.5 text-[12.5px] font-medium text-[#1f6a45]"
+                        key={term}
+                      >
+                        {term}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-4 border-t border-[#eef1ef] pt-3.5 font-mono text-[11.5px] text-[#9aa1ab]">
+                    profile vector · {results.businessProfileHash.slice(0, 16)}
+                  </div>
+                  <div className="mt-4">
+                    <div className="mb-2 flex items-center justify-between text-xs font-semibold text-[#6a746e]">
+                      <span>{isEmbedding ? "Embedding tenders" : "Embedding complete"}</span>
+                      <span>
+                        {results.progress.completed}/{results.progress.total}
+                      </span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-[#eef1ef]">
+                      <div
+                        className="h-full rounded-full bg-[#1f7a4d] transition-all"
+                        style={{
+                          width:
+                            results.progress.total > 0
+                              ? `${Math.round((results.progress.completed / results.progress.total) * 100)}%`
+                              : "0%"
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </aside>
+
+          <section className="min-w-0">
+            <div ref={resultsTopRef} className="scroll-mt-24" />
+            <div className="mb-[18px] flex flex-col justify-between gap-4 xl:flex-row xl:items-center">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="text-sm font-bold text-[#13201a]">
+                  {filteredAndSortedTenders.length} opportunities
+                </span>
+                <span className="hidden h-1 w-1 rounded-full bg-[#c5ccc7] sm:inline" />
+                <div className="flex flex-wrap gap-1.5">
+                  <FilterButton active={filter === "all"} onClick={() => setFilter("all")}>
+                    All · {counts.all}
+                  </FilterButton>
+                  <FilterButton active={filter === "high"} onClick={() => setFilter("high")}>
+                    Strong · {counts.high}
+                  </FilterButton>
+                  <FilterButton active={filter === "medium"} onClick={() => setFilter("medium")}>
+                    Possible · {counts.medium}
+                  </FilterButton>
+                  <FilterButton active={filter === "active"} onClick={() => setFilter("active")}>
+                    Open now · {counts.active}
+                  </FilterButton>
+                </div>
+                <label className="ml-1 inline-flex items-center gap-2 rounded-lg border border-[#e1e5e2] bg-white px-3.5 py-1.5 text-[12.5px] font-semibold text-[#525a60]">
+                  <input
+                    checked={hideExpired}
+                    className="h-4 w-4 accent-[#1f7a4d]"
+                    onChange={(event) => setHideExpired(event.target.checked)}
+                    type="checkbox"
+                  />
+                  No expired tenders
+                </label>
+              </div>
+
+              <label className="flex items-center gap-2 text-[12.5px] text-[#6a746e]">
+                Sort
+                <select
+                  className="rounded-[9px] border border-[#dfe3e1] bg-white px-3 py-2 text-[12.5px] font-semibold text-[#13201a] outline-none"
+                  onChange={(event) => setSort(event.target.value as SortMode)}
+                  value={sort}
+                >
+                  <option value="match">Best match</option>
+                  <option value="value">Highest value</option>
+                  <option value="deadline">Closing soonest</option>
+                </select>
+              </label>
+            </div>
+
+            {error ? (
+              <div className="mb-4 rounded-2xl border border-[#f4cbc6] bg-[#fdeceb] p-4 text-sm font-semibold text-[#b42318]">
+                {error}
+              </div>
+            ) : null}
+
+            {results?.warnings.map((warning) => (
+              <div
+                className="mb-4 rounded-2xl border border-[#eedcb2] bg-[#fbf1de] p-4 text-sm font-semibold text-[#8a560f]"
+                key={warning}
+              >
+                {warning}
+              </div>
+            ))}
+
+            {isLoading ? (
+              <div className="grid min-h-72 place-items-center rounded-2xl border border-[#e4e7e5] bg-white">
+                <div className="flex items-center gap-3 text-sm font-semibold text-[#6a746e]">
+                  <Spinner dark />
+                  Fetching procurement notices
+                </div>
+              </div>
+            ) : rankedTenders.length > 0 ? (
+              <div className="flex flex-col gap-3.5">
+                {isEmbedding ? (
+                  <div className="rounded-2xl border border-[#e4e7e5] bg-white p-4 text-sm font-semibold text-[#6a746e]">
+                    <div className="flex items-center gap-3">
+                      <Spinner dark />
+                      Ranking is updating as embeddings are generated in batches.
+                    </div>
+                  </div>
+                ) : null}
+                {rankedTenders.map((tender, index) => (
+                  <TenderCard
+                    isEmbedding={Boolean(isEmbedding)}
+                    key={`${tender.id}-${tender.title}-${tender.deadlineDate}-${index}-${tender.embeddingStatus}`}
+                    tender={tender}
+                  />
                 ))}
-              </div>
-              <p className="mt-4 break-all text-xs leading-5 text-slate-500">
-                Profile vector: {results.businessProfileHash.slice(0, 16)}
-              </p>
-              {isEmbedding ? (
-                <div className="mt-4">
-                  <div className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-600">
-                    <span>Embedding tenders</span>
-                    <span>
-                      {results.progress.completed}/{results.progress.total}
-                    </span>
-                  </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-slate-100">
-                    <div
-                      className="h-full rounded-full bg-moss transition-all"
-                      style={{
-                        width:
-                          results.progress.total > 0
-                            ? `${Math.round((results.progress.completed / results.progress.total) * 100)}%`
-                            : "0%"
-                      }}
-                    />
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </aside>
-
-        <section className="min-w-0">
-          {error ? (
-            <div className="rounded-lg border border-signal bg-orange-50 p-4 text-sm font-semibold text-signal">
-              {error}
-            </div>
-          ) : null}
-
-          {results?.warnings.map((warning) => (
-            <div
-              className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm font-semibold text-amber-900"
-              key={warning}
-            >
-              {warning}
-            </div>
-          ))}
-
-          {isLoading ? (
-            <div className="grid min-h-72 place-items-center rounded-lg border border-line bg-white">
-              <div className="flex items-center gap-3 text-sm font-semibold text-slate-600">
-                <span className="h-5 w-5 animate-spin rounded-full border-2 border-moss border-t-transparent" />
-                Searching procurement notices
-              </div>
-            </div>
-          ) : rankedTenders.length > 0 ? (
-            <div className="grid gap-4">
-              {isEmbedding ? (
-                <div className="rounded-lg border border-line bg-white p-4 text-sm font-semibold text-slate-600">
-                  <div className="flex items-center gap-3">
-                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-moss border-t-transparent" />
-                    Ranking is updating as embeddings are generated in batches.
+                <div className="flex flex-col items-center justify-between gap-3 rounded-2xl border border-[#e4e7e5] bg-white px-4 py-3 text-sm text-[#6a746e] sm:flex-row">
+                  <span>
+                    Showing {(currentPage - 1) * PAGE_SIZE + 1}-
+                    {Math.min(currentPage * PAGE_SIZE, filteredAndSortedTenders.length)} of{" "}
+                    {filteredAndSortedTenders.length}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="rounded-lg border border-[#e1e5e2] bg-white px-3.5 py-2 text-[12.5px] font-semibold text-[#525a60] transition hover:border-[#c8e3d4] hover:text-[#13201a] disabled:cursor-not-allowed disabled:opacity-45"
+                      disabled={currentPage <= 1}
+                      onClick={() => changePage(currentPage - 1)}
+                      type="button"
+                    >
+                      Previous
+                    </button>
+                    <form className="flex items-center gap-2" onSubmit={handlePageInputSubmit}>
+                      <input
+                        aria-label="Page number"
+                        className="h-9 w-16 rounded-lg border border-[#dfe3e1] bg-white px-2 text-center text-[12.5px] font-semibold text-[#13201a] outline-none focus:border-[#1f7a4d] focus:ring-2 focus:ring-[#1f7a4d]/10"
+                        inputMode="numeric"
+                        min={1}
+                        max={totalPages}
+                        onChange={(event) => setPageInput(event.target.value)}
+                        type="number"
+                        value={pageInput}
+                      />
+                      <span className="text-[12.5px] font-semibold text-[#13201a]">/ {totalPages}</span>
+                    </form>
+                    <button
+                      className="rounded-lg border border-[#1f7a4d] bg-[#1f7a4d] px-3.5 py-2 text-[12.5px] font-semibold text-white transition hover:bg-[#15643f] disabled:cursor-not-allowed disabled:border-[#c5ccc7] disabled:bg-[#c5ccc7]"
+                      disabled={currentPage >= totalPages}
+                      onClick={() => changePage(currentPage + 1)}
+                      type="button"
+                    >
+                      Next
+                    </button>
                   </div>
                 </div>
-              ) : null}
-              {rankedTenders.map((tender) => (
-                <TenderCard key={tender.id} tender={tender} />
-              ))}
-            </div>
-          ) : (
-            <div className="grid min-h-72 place-items-center rounded-lg border border-dashed border-line bg-white p-8 text-center">
-              <div>
-                <h2 className="text-lg font-semibold text-ink">No tender matches loaded</h2>
-                <p className="mt-2 max-w-md text-sm leading-6 text-slate-600">
-                  Add a business profile with sector, services, delivery model, and technology terms.
-                </p>
               </div>
-            </div>
-          )}
-        </section>
+            ) : (
+              <div className="grid min-h-72 place-items-center rounded-2xl border border-dashed border-[#dfe3e1] bg-white p-8 text-center">
+                <div>
+                  <h2 className="text-lg font-bold text-[#13201a]">No tender matches loaded</h2>
+                  <p className="mt-2 max-w-md text-sm leading-6 text-[#5c655f]">
+                    Add a business profile with sector, services, delivery model, and technology terms.
+                  </p>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
       </div>
     </main>
   );

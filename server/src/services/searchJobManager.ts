@@ -72,18 +72,6 @@ function buildWarnings(job: SearchJob): string[] {
     );
   }
 
-  if (job.progress.businessEmbeddingReused !== null) {
-    warnings.push(
-      job.progress.businessEmbeddingReused
-        ? "Reused cached embedding for unchanged business profile."
-        : "Generated a new embedding for the changed business profile."
-    );
-  }
-
-  warnings.push(
-    `Tender embeddings reused: ${job.progress.tenderEmbeddingsReused}; created: ${job.progress.tenderEmbeddingsCreated}.`
-  );
-
   if (job.error) {
     warnings.push(job.error);
   }
@@ -92,13 +80,24 @@ function buildWarnings(job: SearchJob): string[] {
 }
 
 function toResponse(job: SearchJob): SearchResponse {
+  const tenders = job.tenders.map((tender) => {
+    if (job.status !== "processing" && tender.embeddingStatus === "pending") {
+      return {
+        ...tender,
+        embeddingStatus: "failed" as const
+      };
+    }
+
+    return tender;
+  });
+
   return {
     searchId: job.id,
     status: job.status,
     queryTerms: job.queryTerms,
     businessProfileHash: job.businessProfileHash,
     source: job.source,
-    tenders: [...job.tenders].sort(compareTenders),
+    tenders: tenders.sort(compareTenders),
     warnings: buildWarnings(job),
     progress: job.progress
   };
@@ -234,6 +233,12 @@ export class SearchJobManager {
         });
 
         await yieldToEventLoop();
+      }
+
+      for (const tender of job.tenders) {
+        if (tender.embeddingStatus === "pending") {
+          tender.embeddingStatus = "failed";
+        }
       }
 
       job.status = "complete";
