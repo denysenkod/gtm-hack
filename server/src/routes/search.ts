@@ -4,6 +4,7 @@ import type { SearchResponse } from "../../../shared/tender.js";
 import { extractKeyTerms } from "../utils/text.js";
 import { FindTenderClient } from "../clients/findTenderClient.js";
 import { EmbeddingService } from "../services/embeddingService.js";
+import { SearchJobManager } from "../services/searchJobManager.js";
 import { VectorStore } from "../services/vectorStore.js";
 import { logInfo } from "../utils/logger.js";
 
@@ -15,6 +16,7 @@ const router = Router();
 const client = new FindTenderClient();
 const embeddings = new EmbeddingService();
 const vectorStore = new VectorStore(embeddings);
+const searchJobs = new SearchJobManager(vectorStore);
 
 router.post("/", async (request, response) => {
   const startedAt = performance.now();
@@ -56,29 +58,33 @@ router.post("/", async (request, response) => {
     warnings: result.warnings.length
   });
 
-  const vectorResult = await vectorStore.indexAndSearch(parsed.data.businessSpecification, activeTenders);
-  const cacheSummary = [
-    vectorResult.businessEmbeddingReused
-      ? "Reused cached embedding for unchanged business profile."
-      : "Generated a new embedding for the changed business profile.",
-    `Tender embeddings reused: ${vectorResult.tenderEmbeddingsReused}; created: ${vectorResult.tenderEmbeddingsCreated}.`
-  ];
-
-  const payload: SearchResponse = {
+  const payload: SearchResponse = searchJobs.create({
     queryTerms,
-    businessProfileHash: vectorResult.businessProfileHash,
     source: result.source,
-    tenders: vectorResult.matches,
-    warnings: [...result.warnings, ...cacheSummary]
-  };
+    tenders: activeTenders,
+    businessSpecification: parsed.data.businessSpecification,
+    sourceWarnings: result.warnings
+  });
 
-  logInfo("Tender search response ready", {
+  logInfo("Tender search job response ready", {
+    searchId: payload.searchId,
     source: payload.source,
     matches: payload.tenders.length,
-    topTenderId: payload.tenders[0]?.id,
-    topMatchScore: payload.tenders[0]?.matchScore,
     elapsedMs: Math.round(performance.now() - startedAt)
   });
+
+  response.json(payload);
+});
+
+router.get("/:searchId", (request, response) => {
+  const payload = searchJobs.get(request.params.searchId);
+
+  if (!payload) {
+    response.status(404).json({
+      error: "Search job not found."
+    });
+    return;
+  }
 
   response.json(payload);
 });

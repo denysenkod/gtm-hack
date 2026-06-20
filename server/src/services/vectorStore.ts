@@ -34,6 +34,7 @@ export interface BusinessProfileVector {
 export interface IndexedTender {
   tender: Tender;
   textHash: string;
+  embedding: EmbeddingVector;
   cacheHit: boolean;
 }
 
@@ -47,7 +48,7 @@ export interface VectorSearchResult {
 
 const DEFAULT_STORE_PATH = ".data/vector-store.json";
 
-function cosineSimilarity(left: EmbeddingVector, right: EmbeddingVector): number {
+export function cosineSimilarity(left: EmbeddingVector, right: EmbeddingVector): number {
   const length = Math.min(left.length, right.length);
   let dot = 0;
 
@@ -58,7 +59,7 @@ function cosineSimilarity(left: EmbeddingVector, right: EmbeddingVector): number
   return dot;
 }
 
-function classifyQuality(score: number): TenderMatch["matchQuality"] {
+export function classifyQuality(score: number): TenderMatch["matchQuality"] {
   if (score >= 0.62) {
     return "high";
   }
@@ -140,7 +141,8 @@ export class VectorStore {
         return {
           ...record.tender!,
           matchScore,
-          matchQuality: classifyQuality(matchScore)
+          matchQuality: classifyQuality(matchScore),
+          embeddingStatus: "ready" as const
         };
       })
       .sort((left, right) => {
@@ -171,7 +173,7 @@ export class VectorStore {
     };
   }
 
-  private async getOrCreateBusinessProfile(profileText: string): Promise<BusinessProfileVector> {
+  async getOrCreateBusinessProfile(profileText: string): Promise<BusinessProfileVector> {
     const metadata = this.embeddingService.metadata;
     const hash = hashText(profileText);
     const id = `profile-${hash}`;
@@ -206,7 +208,7 @@ export class VectorStore {
     };
   }
 
-  private async getOrCreateTender(tender: Tender): Promise<IndexedTender> {
+  async getOrCreateTender(tender: Tender): Promise<IndexedTender> {
     const metadata = this.embeddingService.metadata;
     const tenderText = tenderToSearchText(tender);
     const textHash = hashText(tenderText);
@@ -225,6 +227,7 @@ export class VectorStore {
       return {
         tender,
         textHash,
+        embedding: existing.embedding,
         cacheHit: true
       };
     }
@@ -245,11 +248,12 @@ export class VectorStore {
     return {
       tender,
       textHash,
+      embedding,
       cacheHit: false
     };
   }
 
-  private async load(): Promise<void> {
+  async load(): Promise<void> {
     if (this.hasLoaded) {
       return;
     }
@@ -281,7 +285,7 @@ export class VectorStore {
     this.hasLoaded = true;
   }
 
-  private async persist(): Promise<void> {
+  async persist(): Promise<void> {
     const payload: PersistedVectorStore = {
       version: 1,
       records: [...this.records.values()]

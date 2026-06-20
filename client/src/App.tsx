@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { SearchResponse, TenderMatch } from "../../shared/tender";
 
 const exampleSpecification =
@@ -82,7 +82,17 @@ function deadlineLabel(days: number | null): string {
   return `${days} days left`;
 }
 
-function matchTone(quality: TenderMatch["matchQuality"]): string {
+function matchTone(tender: TenderMatch): string {
+  if (tender.embeddingStatus === "pending") {
+    return "border-slate-300 bg-slate-50 text-slate-600";
+  }
+
+  if (tender.embeddingStatus === "failed") {
+    return "border-signal bg-orange-50 text-signal";
+  }
+
+  const { matchQuality: quality } = tender;
+
   if (quality === "high") {
     return "border-moss bg-mist text-moss";
   }
@@ -94,8 +104,29 @@ function matchTone(quality: TenderMatch["matchQuality"]): string {
   return "border-slate-300 bg-slate-50 text-slate-700";
 }
 
-function formatMatchScore(score: number): string {
+function formatMatchScore(tender: TenderMatch): string {
+  if (tender.embeddingStatus === "pending") {
+    return "- (0%)";
+  }
+
+  if (tender.embeddingStatus === "failed") {
+    return "Failed";
+  }
+
+  const { matchScore: score } = tender;
   return `${Math.round(score * 100)}%`;
+}
+
+function matchLabel(tender: TenderMatch): string {
+  if (tender.embeddingStatus === "pending") {
+    return "Embedding";
+  }
+
+  if (tender.embeddingStatus === "failed") {
+    return "Embedding failed";
+  }
+
+  return `${tender.matchQuality} match`;
 }
 
 function TenderCard({ tender }: { tender: TenderMatch }) {
@@ -113,8 +144,13 @@ function TenderCard({ tender }: { tender: TenderMatch }) {
             <span className={`rounded border px-2 py-1 text-xs font-semibold ${deadlineTone(days)}`}>
               {deadlineLabel(days)}
             </span>
-            <span className={`rounded border px-2 py-1 text-xs font-semibold ${matchTone(tender.matchQuality)}`}>
-              {tender.matchQuality} match
+            <span
+              className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs font-semibold ${matchTone(tender)}`}
+            >
+              {tender.embeddingStatus === "pending" ? (
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              ) : null}
+              {matchLabel(tender)}
             </span>
           </div>
           <h2 className="text-lg font-semibold leading-snug text-ink">{tender.title}</h2>
@@ -127,7 +163,7 @@ function TenderCard({ tender }: { tender: TenderMatch }) {
             {formatCurrency(tender.value, tender.currency)}
           </span>
           <span className="text-sm font-semibold text-moss">
-            {formatMatchScore(tender.matchScore)} match quality
+            {formatMatchScore(tender)} match quality
           </span>
           <span className="text-sm text-slate-500">{formatDate(tender.deadlineDate)}</span>
         </div>
@@ -151,7 +187,11 @@ function TenderCard({ tender }: { tender: TenderMatch }) {
           </div>
           <div>
             <dt className="font-semibold text-slate-500">Cosine match score</dt>
-            <dd className="mt-1 text-ink">{formatMatchScore(tender.matchScore)}</dd>
+            <dd className="mt-1 text-ink">{formatMatchScore(tender)}</dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-slate-500">Embedding status</dt>
+            <dd className="mt-1 capitalize text-ink">{tender.embeddingStatus}</dd>
           </div>
           <div>
             <dt className="font-semibold text-slate-500">Buyer</dt>
@@ -210,6 +250,44 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
 
   const rankedTenders = useMemo(() => results?.tenders ?? [], [results]);
+  const isEmbedding = results?.status === "processing";
+
+  useEffect(() => {
+    if (!results || results.status !== "processing") {
+      return;
+    }
+
+    let isCancelled = false;
+    const { searchId } = results;
+
+    async function pollSearch() {
+      try {
+        const response = await fetch(`/api/search/${searchId}`);
+        const payload = (await response.json()) as SearchResponse | { error?: string };
+
+        if (!response.ok) {
+          throw new Error("error" in payload ? payload.error : "Search update failed.");
+        }
+
+        if (!isCancelled) {
+          setResults(payload as SearchResponse);
+        }
+      } catch (pollError) {
+        if (!isCancelled) {
+          setError(pollError instanceof Error ? pollError.message : "Search update failed.");
+        }
+      }
+    }
+
+    const firstPoll = window.setTimeout(pollSearch, 700);
+    const interval = window.setInterval(pollSearch, 1400);
+
+    return () => {
+      isCancelled = true;
+      window.clearTimeout(firstPoll);
+      window.clearInterval(interval);
+    };
+  }, [results?.searchId, results?.status]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -261,6 +339,12 @@ export default function App() {
               <span className="text-sm font-semibold text-slate-600">Matches</span>
               <span className="text-sm font-semibold text-ink">{rankedTenders.length}</span>
             </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm font-semibold text-slate-600">Embedded</span>
+              <span className="text-sm font-semibold text-ink">
+                {results ? `${results.progress.completed}/${results.progress.total}` : "0/0"}
+              </span>
+            </div>
           </div>
         </div>
       </section>
@@ -304,6 +388,27 @@ export default function App() {
               <p className="mt-4 break-all text-xs leading-5 text-slate-500">
                 Profile vector: {results.businessProfileHash.slice(0, 16)}
               </p>
+              {isEmbedding ? (
+                <div className="mt-4">
+                  <div className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-600">
+                    <span>Embedding tenders</span>
+                    <span>
+                      {results.progress.completed}/{results.progress.total}
+                    </span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+                    <div
+                      className="h-full rounded-full bg-moss transition-all"
+                      style={{
+                        width:
+                          results.progress.total > 0
+                            ? `${Math.round((results.progress.completed / results.progress.total) * 100)}%`
+                            : "0%"
+                      }}
+                    />
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </aside>
@@ -333,6 +438,14 @@ export default function App() {
             </div>
           ) : rankedTenders.length > 0 ? (
             <div className="grid gap-4">
+              {isEmbedding ? (
+                <div className="rounded-lg border border-line bg-white p-4 text-sm font-semibold text-slate-600">
+                  <div className="flex items-center gap-3">
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-moss border-t-transparent" />
+                    Ranking is updating as embeddings are generated in batches.
+                  </div>
+                </div>
+              ) : null}
               {rankedTenders.map((tender) => (
                 <TenderCard key={tender.id} tender={tender} />
               ))}
