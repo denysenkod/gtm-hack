@@ -31,6 +31,8 @@ The backend queries Find a Tender OCDS releases, normalizes candidate records in
 
 Embeddings are cached by normalized text hash plus model name. Unchanged tender text reuses its existing vector, and the business profile vector is only regenerated when the submitted description changes.
 
+In production, onboarding stores the company website and LinkedIn URL in Cloudflare D1 under an anonymous browser session id. The session id is generated in the browser and saved in `localStorage`; it is used only to group profile data and search jobs before proper authentication exists.
+
 ## Useful Environment Variables
 
 - `PORT`: Backend port, defaults to `8787`
@@ -56,3 +58,18 @@ Embedding progress, selected device, cache hits, vector indexing progress, and f
 npm run typecheck
 npm run build
 ```
+
+## Cloudflare Deployment
+
+Production is configured for Cloudflare Workers in `wrangler.toml`.
+
+```bash
+npx wrangler d1 create gtm-hack-tender-discovery
+# copy the returned database_id into wrangler.toml
+npm run deploy:migrations
+npm run deploy
+```
+
+GitHub Actions deploys on pushes to `main` with `.github/workflows/deploy-cloudflare.yml`. Add `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` as repository secrets before enabling CI/CD.
+
+See `docs/cloudflare-workers-deployment.md` for the D1 schema, Workers AI embedding path, custom domain setup, and first deploy checklist.

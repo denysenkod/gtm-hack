@@ -7,10 +7,103 @@ const exampleSpecification =
 
 type MatchFilter = "all" | "high" | "medium" | "active";
 type SortMode = "match" | "value" | "deadline";
+type OnboardingStep = 1 | 2;
+
+interface OnboardingProfile {
+  companyWebsite: string;
+  linkedinUrl: string;
+}
 
 const CIRCLE_RADIUS = 20;
 const CIRCLE_CIRCUMFERENCE = 2 * Math.PI * CIRCLE_RADIUS;
 const PAGE_SIZE = 25;
+const ONBOARDING_STORAGE_KEY = "tenderDiscoveryOnboarding";
+const BROWSER_SESSION_STORAGE_KEY = "tenderDiscoveryBrowserSessionId";
+
+function readOrCreateBrowserSessionId(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  const existingSessionId = window.localStorage.getItem(BROWSER_SESSION_STORAGE_KEY)?.trim();
+
+  if (existingSessionId) {
+    return existingSessionId;
+  }
+
+  const nextSessionId = window.crypto.randomUUID();
+  window.localStorage.setItem(BROWSER_SESSION_STORAGE_KEY, nextSessionId);
+  return nextSessionId;
+}
+
+function readOnboardingProfile(): OnboardingProfile | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const rawProfile = window.localStorage.getItem(ONBOARDING_STORAGE_KEY);
+
+    if (!rawProfile) {
+      return null;
+    }
+
+    const parsed = JSON.parse(rawProfile) as Partial<OnboardingProfile>;
+    const companyWebsite = typeof parsed.companyWebsite === "string" ? parsed.companyWebsite.trim() : "";
+    const linkedinUrl = typeof parsed.linkedinUrl === "string" ? parsed.linkedinUrl.trim() : "";
+
+    if (!companyWebsite || !linkedinUrl) {
+      return null;
+    }
+
+    return {
+      companyWebsite,
+      linkedinUrl
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildBusinessSpecificationFromProfile(profile: OnboardingProfile): string {
+  return [
+    `Company website: ${profile.companyWebsite}`,
+    `LinkedIn profile: ${profile.linkedinUrl}`,
+    "Use these public sources to infer the company's services, sectors, operating geography, relevant CPV categories, semantic keywords, and value thresholds for procurement matching."
+  ].join("\n");
+}
+
+async function persistOnboardingProfile(sessionId: string, profile: OnboardingProfile): Promise<void> {
+  if (!sessionId) {
+    return;
+  }
+
+  const response = await fetch("/api/profile", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      browserSessionId: sessionId,
+      companyWebsite: profile.companyWebsite,
+      linkedinUrl: profile.linkedinUrl
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error("Profile persistence failed.");
+  }
+}
+
+function normalizeUrlInput(value: string): string {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) {
+    return "";
+  }
+
+  return /^https?:\/\//i.test(trimmedValue) ? trimmedValue : `https://${trimmedValue}`;
+}
 
 function formatCurrency(value: number, currency: string): string {
   if (value <= 0) {
@@ -385,8 +478,47 @@ function TenderCard({ isEmbedding, tender }: { isEmbedding: boolean; tender: Ten
   );
 }
 
+function OnboardingProgress({ currentStep }: { currentStep: OnboardingStep }) {
+  return (
+    <div aria-label="Onboarding progress" className="fixed inset-x-0 bottom-8 flex justify-center">
+      <div className="flex items-center gap-3">
+        {[1, 2].map((step) => {
+          const isComplete = step < currentStep;
+          const isCurrent = step === currentStep;
+
+          return (
+            <div className="flex items-center gap-3" key={step}>
+              {step > 1 ? <div className="h-px w-10 bg-[#cfd6d2]" /> : null}
+              <div
+                aria-current={isCurrent ? "step" : undefined}
+                className={`grid h-10 w-10 place-items-center rounded-full border text-sm font-extrabold transition ${
+                  isComplete
+                    ? "border-[#1f7a4d] bg-[#1f7a4d] text-white"
+                    : isCurrent
+                      ? "border-[#13201a] bg-white text-[#13201a] shadow-[0_0_0_5px_rgba(31,122,77,0.13)]"
+                      : "border-[#cfd6d2] bg-white text-[#7a847e]"
+                }`}
+              >
+                {step}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
-  const [businessSpecification, setBusinessSpecification] = useState("");
+  const savedProfile = useMemo(() => readOnboardingProfile(), []);
+  const [browserSessionId] = useState(() => readOrCreateBrowserSessionId());
+  const [companyWebsite, setCompanyWebsite] = useState(savedProfile?.companyWebsite ?? "");
+  const [linkedinUrl, setLinkedinUrl] = useState(savedProfile?.linkedinUrl ?? "");
+  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(1);
+  const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(Boolean(savedProfile));
+  const [businessSpecification, setBusinessSpecification] = useState(() =>
+    savedProfile ? buildBusinessSpecificationFromProfile(savedProfile) : ""
+  );
   const [results, setResults] = useState<SearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -431,6 +563,56 @@ export default function App() {
 
   const isEmbedding = results?.status === "processing";
   const strongCount = counts.high;
+
+  function completeOnboarding(profile: OnboardingProfile): void {
+    window.localStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(profile));
+    setBusinessSpecification(buildBusinessSpecificationFromProfile(profile));
+    setHasCompletedOnboarding(true);
+    void persistOnboardingProfile(browserSessionId, profile).catch((profileError: unknown) => {
+      console.warn(profileError instanceof Error ? profileError.message : "Profile persistence failed.");
+    });
+  }
+
+  useEffect(() => {
+    if (!savedProfile) {
+      return;
+    }
+
+    void persistOnboardingProfile(browserSessionId, savedProfile).catch((profileError: unknown) => {
+      console.warn(profileError instanceof Error ? profileError.message : "Profile persistence failed.");
+    });
+  }, [browserSessionId, savedProfile]);
+
+  function handleWebsiteSubmit(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault();
+
+    const normalizedWebsite = normalizeUrlInput(companyWebsite);
+
+    if (!normalizedWebsite) {
+      return;
+    }
+
+    setCompanyWebsite(normalizedWebsite);
+    setOnboardingStep(2);
+  }
+
+  function handleLinkedinSubmit(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault();
+
+    const normalizedWebsite = normalizeUrlInput(companyWebsite);
+    const normalizedLinkedinUrl = normalizeUrlInput(linkedinUrl);
+
+    if (!normalizedWebsite || !normalizedLinkedinUrl) {
+      return;
+    }
+
+    setCompanyWebsite(normalizedWebsite);
+    setLinkedinUrl(normalizedLinkedinUrl);
+    completeOnboarding({
+      companyWebsite: normalizedWebsite,
+      linkedinUrl: normalizedLinkedinUrl
+    });
+  }
 
   useEffect(() => {
     setPage(1);
@@ -518,7 +700,10 @@ export default function App() {
         headers: {
           "content-type": "application/json"
         },
-        body: JSON.stringify({ businessSpecification })
+        body: JSON.stringify({
+          browserSessionId,
+          businessSpecification
+        })
       });
 
       const payload = (await response.json()) as SearchResponse | { error?: string };
@@ -534,6 +719,46 @@ export default function App() {
     } finally {
       setIsLoading(false);
     }
+  }
+
+  if (!hasCompletedOnboarding) {
+    const isWebsiteStep = onboardingStep === 1;
+
+    return (
+      <main className="min-h-screen bg-[#eceeed] text-[#13201a]">
+        <div className="grid min-h-screen place-items-center px-5 py-24">
+          <form
+            className="w-full max-w-[680px] text-center"
+            onSubmit={isWebsiteStep ? handleWebsiteSubmit : handleLinkedinSubmit}
+          >
+            <label
+              className="block text-3xl font-extrabold leading-tight tracking-normal text-[#13201a] sm:text-[44px]"
+              htmlFor={isWebsiteStep ? "company-website" : "linkedin-url"}
+            >
+              {isWebsiteStep ? "Enter your company website" : "Enter your LinkedIn"}
+            </label>
+            <input
+              autoComplete="url"
+              autoFocus
+              className="mt-8 h-14 w-full rounded-[12px] border border-[#dfe3e1] bg-white px-5 text-center text-[18px] font-semibold text-[#13201a] outline-none transition placeholder:text-[#a0a8a2] focus:border-[#1f7a4d] focus:ring-4 focus:ring-[#1f7a4d]/12"
+              id={isWebsiteStep ? "company-website" : "linkedin-url"}
+              inputMode="url"
+              onChange={(event) =>
+                isWebsiteStep ? setCompanyWebsite(event.target.value) : setLinkedinUrl(event.target.value)
+              }
+              placeholder={isWebsiteStep ? "https://example.com" : "https://www.linkedin.com/company/example"}
+              required
+              type="text"
+              value={isWebsiteStep ? companyWebsite : linkedinUrl}
+            />
+            <button className="sr-only" type="submit">
+              Continue
+            </button>
+          </form>
+        </div>
+        <OnboardingProgress currentStep={onboardingStep} />
+      </main>
+    );
   }
 
   return (

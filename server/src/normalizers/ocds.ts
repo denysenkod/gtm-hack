@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { Tender } from "../../../shared/tender.js";
 import type { OcdsDocument, OcdsRelease, OcdsTender } from "../types/ocds.js";
 import { isFutureDate } from "../utils/dates.js";
@@ -64,7 +63,7 @@ export function normalizeOcdsRelease(release: OcdsRelease): Tender | null {
   }
 
   return {
-    id: release.ocid ?? tender.id ?? release.id ?? randomUUID(),
+    id: release.ocid ?? tender.id ?? release.id ?? crypto.randomUUID(),
     title,
     buyerName: resolveBuyerName(release),
     description,
