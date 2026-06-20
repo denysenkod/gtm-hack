@@ -8,10 +8,46 @@ const exampleSpecification =
 type MatchFilter = "all" | "high" | "medium" | "active";
 type SortMode = "match" | "value" | "deadline";
 type OnboardingStep = 1 | 2;
+type MarketSource = "all" | "prozorro" | "find-a-tender";
 
 interface OnboardingProfile {
   companyWebsite: string;
   linkedinUrl: string;
+}
+
+interface MarketOption {
+  value: MarketSource;
+  label: string;
+  shortLabel: string;
+}
+
+interface ProzorroAgentMatch {
+  id: string;
+  tenderId: string;
+  title: string;
+  buyerName: string;
+  value: number;
+  currency: string;
+  deadlineDate: string;
+  cpvCodes: string[];
+  matchedBuckets: string[];
+  matchedKeywords: string[];
+  negativeKeywords: string[];
+  score: number;
+  decision: "bid" | "maybe" | "skip";
+  whyRelevant: string;
+  risks: string[];
+  url: string;
+}
+
+interface ProzorroAgentSearchResponse {
+  filters?: {
+    cpvPrefixes?: string[];
+    keywordsUk?: string[];
+  };
+  scanned: number;
+  matches: ProzorroAgentMatch[];
+  error?: string;
 }
 
 const CIRCLE_RADIUS = 20;
@@ -19,6 +55,23 @@ const CIRCLE_CIRCUMFERENCE = 2 * Math.PI * CIRCLE_RADIUS;
 const PAGE_SIZE = 25;
 const ONBOARDING_STORAGE_KEY = "tenderDiscoveryOnboarding";
 const BROWSER_SESSION_STORAGE_KEY = "tenderDiscoveryBrowserSessionId";
+const MARKET_OPTIONS: MarketOption[] = [
+  {
+    value: "all",
+    label: "🌐 All markets",
+    shortLabel: "All markets"
+  },
+  {
+    value: "prozorro",
+    label: "🇺🇦 ProZorro",
+    shortLabel: "ProZorro"
+  },
+  {
+    value: "find-a-tender",
+    label: "🇬🇧 Find a Tender OCDS",
+    shortLabel: "Find a Tender OCDS"
+  }
+];
 
 function readOrCreateBrowserSessionId(): string {
   if (typeof window === "undefined") {
@@ -103,6 +156,122 @@ function normalizeUrlInput(value: string): string {
   }
 
   return /^https?:\/\//i.test(trimmedValue) ? trimmedValue : `https://${trimmedValue}`;
+}
+
+function selectedMarketLabel(source: MarketSource): string {
+  return MARKET_OPTIONS.find((option) => option.value === source)?.label ?? "🌐 All markets";
+}
+
+function classifyProzorroQuality(score: number): TenderMatch["matchQuality"] {
+  if (score >= 75) {
+    return "high";
+  }
+
+  if (score >= 50) {
+    return "medium";
+  }
+
+  return "low";
+}
+
+function buildProzorroDescription(match: ProzorroAgentMatch): string {
+  const details = [
+    match.whyRelevant,
+    match.matchedBuckets.length > 0 ? `Matched CPV buckets: ${match.matchedBuckets.join(", ")}.` : "",
+    match.cpvCodes.length > 0 ? `CPV codes: ${match.cpvCodes.join(", ")}.` : "",
+    match.matchedKeywords.length > 0 ? `Keywords: ${match.matchedKeywords.join(", ")}.` : "",
+    match.risks.length > 0 ? `Risks: ${match.risks.join(" ")}` : ""
+  ].filter(Boolean);
+
+  return details.join("\n");
+}
+
+function prozorroMatchToTender(match: ProzorroAgentMatch): TenderMatch {
+  return {
+    id: match.tenderId || match.id,
+    title: match.title,
+    buyerName: match.buyerName,
+    description: buildProzorroDescription(match),
+    value: match.value,
+    currency: match.currency || "UAH",
+    publicationDate: new Date().toISOString(),
+    deadlineDate: match.deadlineDate,
+    documentationUrls: match.url ? [match.url] : [],
+    status: "active",
+    matchScore: Math.max(0, Math.min(1, match.score / 100)),
+    matchQuality: classifyProzorroQuality(match.score),
+    embeddingStatus: "ready"
+  };
+}
+
+function buildProzorroSearchResponse(
+  agentResponse: ProzorroAgentSearchResponse,
+  browserSessionId: string
+): SearchResponse {
+  const queryTerms = [
+    ...(agentResponse.filters?.cpvPrefixes ?? []).map((prefix) => `CPV ${prefix}*`),
+    ...(agentResponse.filters?.keywordsUk ?? [])
+  ].slice(0, 18);
+  const tenders = agentResponse.matches.map(prozorroMatchToTender);
+
+  return {
+    searchId: `prozorro-${browserSessionId}`,
+    status: "complete",
+    queryTerms,
+    businessProfileHash: `agent-${browserSessionId}`.slice(0, 24),
+    source: "find-a-tender",
+    tenders,
+    warnings: [`🇺🇦 ProZorro agent scanned ${agentResponse.scanned} active tenders.`],
+    progress: {
+      total: agentResponse.scanned,
+      completed: tenders.length,
+      pending: 0,
+      tenderEmbeddingsReused: 0,
+      tenderEmbeddingsCreated: 0,
+      businessEmbeddingReused: true,
+      isBusinessEmbeddingReady: true
+    }
+  };
+}
+
+function combineSearchResponses(
+  left: SearchResponse | null,
+  right: SearchResponse | null,
+  browserSessionId: string
+): SearchResponse {
+  const leftTenders = left?.tenders ?? [];
+  const rightTenders = right?.tenders ?? [];
+  const seen = new Set<string>();
+  const tenders = [...leftTenders, ...rightTenders].filter((tender) => {
+    const key = `${tender.id}-${tender.title}`;
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+
+  return {
+    searchId: `all-${browserSessionId}`,
+    status: "complete",
+    queryTerms: [...(left?.queryTerms ?? []), ...(right?.queryTerms ?? [])].slice(0, 24),
+    businessProfileHash: left?.businessProfileHash ?? right?.businessProfileHash ?? `all-${browserSessionId}`,
+    source: "find-a-tender",
+    tenders,
+    warnings: [...(left?.warnings ?? []), ...(right?.warnings ?? [])],
+    progress: {
+      total: (left?.progress.total ?? 0) + (right?.progress.total ?? 0),
+      completed: (left?.progress.completed ?? 0) + (right?.progress.completed ?? 0),
+      pending: 0,
+      tenderEmbeddingsReused: left?.progress.tenderEmbeddingsReused ?? 0,
+      tenderEmbeddingsCreated: left?.progress.tenderEmbeddingsCreated ?? 0,
+      businessEmbeddingReused: left?.progress.businessEmbeddingReused ?? right?.progress.businessEmbeddingReused ?? null,
+      isBusinessEmbeddingReady:
+        Boolean(left?.progress.isBusinessEmbeddingReady) || Boolean(right?.progress.isBusinessEmbeddingReady)
+    }
+  };
 }
 
 function formatCurrency(value: number, currency: string): string {
@@ -527,6 +696,8 @@ export default function App() {
   const [page, setPage] = useState(1);
   const [pageInput, setPageInput] = useState("1");
   const [hideExpired, setHideExpired] = useState(false);
+  const [marketSource, setMarketSource] = useState<MarketSource>("all");
+  const [isSourceMenuOpen, setIsSourceMenuOpen] = useState(false);
   const resultsTopRef = useRef<HTMLDivElement | null>(null);
 
   const filteredAndSortedTenders = useMemo(() => {
@@ -563,6 +734,7 @@ export default function App() {
 
   const isEmbedding = results?.status === "processing";
   const strongCount = counts.high;
+  const marketLabel = selectedMarketLabel(marketSource);
 
   function completeOnboarding(profile: OnboardingProfile): void {
     window.localStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(profile));
@@ -686,6 +858,117 @@ export default function App() {
     };
   }, [results?.searchId, results?.status]);
 
+  async function fetchFindTenderSearch(): Promise<SearchResponse> {
+    const response = await fetch("/api/search", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        browserSessionId,
+        businessSpecification
+      })
+    });
+
+    const payload = (await response.json()) as SearchResponse | { error?: string };
+
+    if (!response.ok) {
+      throw new Error("error" in payload ? payload.error : "Find a Tender search failed.");
+    }
+
+    return payload as SearchResponse;
+  }
+
+  async function fetchProzorroSearch(): Promise<SearchResponse> {
+    const normalizedWebsite = normalizeUrlInput(companyWebsite);
+    const normalizedLinkedinUrl = normalizeUrlInput(linkedinUrl);
+
+    if (!normalizedWebsite || !normalizedLinkedinUrl) {
+      throw new Error("Complete onboarding with a company website and LinkedIn URL before searching ProZorro.");
+    }
+
+    const agentId = encodeURIComponent(browserSessionId || "default-company");
+    const onboardResponse = await fetch(`/agents/tender-intel-agent/${agentId}/onboard`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        companyWebsite: normalizedWebsite,
+        linkedinUrl: normalizedLinkedinUrl,
+        minValueUah: 300000
+      })
+    });
+    const onboardPayload = (await onboardResponse.json()) as { error?: string };
+
+    if (!onboardResponse.ok) {
+      throw new Error(onboardPayload.error ?? "ProZorro agent onboarding failed.");
+    }
+
+    const searchResponse = await fetch(`/agents/tender-intel-agent/${agentId}/search`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        minValueUah: 300000,
+        maxPages: 8
+      })
+    });
+    const searchPayload = (await searchResponse.json()) as ProzorroAgentSearchResponse;
+
+    if (!searchResponse.ok) {
+      throw new Error(searchPayload.error ?? "ProZorro agent search failed.");
+    }
+
+    return buildProzorroSearchResponse(searchPayload, browserSessionId);
+  }
+
+  async function runSelectedMarketSearch(): Promise<SearchResponse> {
+    if (marketSource === "find-a-tender") {
+      return fetchFindTenderSearch();
+    }
+
+    if (marketSource === "prozorro") {
+      return fetchProzorroSearch();
+    }
+
+    const [findTenderResult, prozorroResult] = await Promise.allSettled([
+      fetchFindTenderSearch(),
+      fetchProzorroSearch()
+    ]);
+    const findTenderPayload = findTenderResult.status === "fulfilled" ? findTenderResult.value : null;
+    const prozorroPayload = prozorroResult.status === "fulfilled" ? prozorroResult.value : null;
+
+    if (!findTenderPayload && !prozorroPayload) {
+      const errors = [findTenderResult, prozorroResult]
+        .map((result) => (result.status === "rejected" ? result.reason : null))
+        .filter(Boolean)
+        .map((reason) => (reason instanceof Error ? reason.message : String(reason)));
+
+      throw new Error(errors.join(" "));
+    }
+
+    const warnings = [
+      findTenderResult.status === "rejected"
+        ? `🇬🇧 Find a Tender failed: ${
+            findTenderResult.reason instanceof Error ? findTenderResult.reason.message : String(findTenderResult.reason)
+          }`
+        : "",
+      prozorroResult.status === "rejected"
+        ? `🇺🇦 ProZorro failed: ${
+            prozorroResult.reason instanceof Error ? prozorroResult.reason.message : String(prozorroResult.reason)
+          }`
+        : ""
+    ].filter(Boolean);
+    const combined = combineSearchResponses(findTenderPayload, prozorroPayload, browserSessionId);
+
+    return {
+      ...combined,
+      warnings: [...combined.warnings, ...warnings]
+    };
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
@@ -695,24 +978,8 @@ export default function App() {
     setPage(1);
 
     try {
-      const response = await fetch("/api/search", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({
-          browserSessionId,
-          businessSpecification
-        })
-      });
-
-      const payload = (await response.json()) as SearchResponse | { error?: string };
-
-      if (!response.ok) {
-        throw new Error("error" in payload ? payload.error : "Tender search failed.");
-      }
-
-      setResults(payload as SearchResponse);
+      const payload = await runSelectedMarketSearch();
+      setResults(payload);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Tender search failed.");
       setResults(null);
@@ -774,12 +1041,46 @@ export default function App() {
             </h1>
           </div>
 
-          <div className="w-full rounded-[14px] border border-[#e4e7e5] bg-white px-5 py-1 shadow-[0_1px_2px_rgba(16,28,22,0.04)] lg:w-[268px]">
+          <div className="w-full rounded-[14px] border border-[#e4e7e5] bg-white px-5 py-1 shadow-[0_1px_2px_rgba(16,28,22,0.04)] lg:w-[360px]">
             <div className="flex items-center justify-between border-b border-[#eef1ef] py-3.5">
               <span className="text-[13px] text-[#6a746e]">Source</span>
-              <span className="text-[13px] font-semibold text-[#13201a]">
-                {results?.source === "mock" ? "Mock OCDS" : "Find a Tender OCDS"}
-              </span>
+              <div className="relative">
+                <button
+                  aria-expanded={isSourceMenuOpen}
+                  className="inline-flex min-w-[190px] items-center justify-between gap-3 rounded-lg border border-[#dfe3e1] bg-white px-3 py-2 text-left text-[13px] font-semibold text-[#13201a] transition hover:border-[#c8e3d4] focus:border-[#1f7a4d] focus:outline-none focus:ring-4 focus:ring-[#1f7a4d]/10"
+                  disabled={isLoading}
+                  onClick={() => setIsSourceMenuOpen((isOpen) => !isOpen)}
+                  type="button"
+                >
+                  <span className="truncate">{marketLabel}</span>
+                  <span aria-hidden="true" className="text-[#7a847e]">
+                    ▾
+                  </span>
+                </button>
+                {isSourceMenuOpen ? (
+                  <div className="absolute right-0 z-50 mt-2 w-[230px] overflow-hidden rounded-xl border border-[#dfe3e1] bg-white p-1 shadow-[0_14px_34px_rgba(16,28,22,0.14)]">
+                    {MARKET_OPTIONS.map((option) => (
+                      <button
+                        className={`flex w-full items-center rounded-lg px-3 py-2.5 text-left text-[13px] font-semibold transition ${
+                          option.value === marketSource
+                            ? "bg-[#e6f2ea] text-[#15643f]"
+                            : "text-[#13201a] hover:bg-[#f3f5f4]"
+                        }`}
+                        key={option.value}
+                        onClick={() => {
+                          setMarketSource(option.value);
+                          setIsSourceMenuOpen(false);
+                          setResults(null);
+                          setError(null);
+                        }}
+                        type="button"
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </div>
             <div className="flex items-center justify-between border-b border-[#eef1ef] py-3.5">
               <span className="text-[13px] text-[#6a746e]">Tenders scored</span>

@@ -33,6 +33,33 @@ Embeddings are cached by normalized text hash plus model name. Unchanged tender 
 
 In production, onboarding stores the company website and LinkedIn URL in Cloudflare D1 under an anonymous browser session id. The session id is generated in the browser and saved in `localStorage`; it is used only to group profile data and search jobs before proper authentication exists.
 
+## ProZorro Tender Agent
+
+Production also exposes a Cloudflare Agents SDK Durable Object for stateful per-company ProZorro monitoring:
+
+```http
+POST /agents/tender-intel-agent/{companyId}/onboard
+Content-Type: application/json
+
+{
+  "companyWebsite": "https://szef-montaz.pl/en/home/",
+  "linkedinUrl": "https://www.linkedin.com/company/szef-monta%C5%BC/",
+  "minValueUah": 300000
+}
+```
+
+```http
+POST /agents/tender-intel-agent/{companyId}/search
+Content-Type: application/json
+
+{
+  "minValueUah": 300000,
+  "maxPages": 8
+}
+```
+
+The agent stores company state durably, derives CPV prefixes and Ukrainian semantic keywords, fetches only `active.tendering` ProZorro tenders, filters by value, scores CPV and semantic matches, penalizes false positives, and returns bid/maybe/skip decisions.
+
 ## Useful Environment Variables
 
 - `PORT`: Backend port, defaults to `8787`
@@ -49,6 +76,10 @@ In production, onboarding stores the company website and LinkedIn URL in Cloudfl
 - `TRANSFORMERS_ALLOW_REMOTE_MODELS=false`: Require the embedding model to already exist in the local cache
 - `VECTOR_STORE_PATH`: Persisted vector database path, defaults to `.data/vector-store.json`
 - `SERVER_LOG_PATH`: Server progress log file, defaults to `.data/server.log`
+- `TENDER_INTEL_LLM_MODEL`: Workers AI model for company profile extraction in the ProZorro agent.
+- `PROZORRO_BASE_URL`: ProZorro public procurement API base URL.
+- `PROZORRO_FEED_PAGES`: Number of recent feed pages the ProZorro agent scans by default.
+- `PROZORRO_FEED_LIMIT`: Tender feed page size used by the ProZorro agent.
 
 Embedding progress, selected device, cache hits, vector indexing progress, and final match summaries are written to the server log file as well as stdout.
 
