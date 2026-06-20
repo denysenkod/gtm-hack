@@ -4,6 +4,8 @@
 
 Production runs as a Cloudflare Worker with static assets, an API Worker, Cloudflare D1 storage, and Workers AI embeddings.
 
+The ProZorro tender intelligence path runs as a Cloudflare Agents SDK Durable Object. Each company gets a durable agent instance keyed by `{companyId}` under `/agents/tender-intel-agent/{companyId}`.
+
 The local development server remains unchanged:
 
 - Vite serves the React client.
@@ -19,8 +21,11 @@ The production Worker path exists separately in `worker/src/index.ts` because th
 - `ASSETS`: serves `dist/client` after `npm run build:client`.
 - `DB`: D1 database for search jobs and cached vectors.
 - `AI`: Workers AI binding used to generate semantic embeddings.
+- `TenderIntelAgent`: Durable Object namespace for per-company ProZorro tender intelligence agents.
 
 The Worker uses `@cf/baai/bge-base-en-v1.5` by default, configured with `WORKERS_AI_EMBEDDING_MODEL`. The model returns 768-dimensional embeddings, so D1 stores vectors as JSON arrays with the model name and text hash. If the model changes, cache keys include the new model name and embeddings are regenerated.
+
+The ProZorro agent uses `TENDER_INTEL_LLM_MODEL` for company-profile extraction, then deterministic CPV/keyword/value scoring for tender matching. `PROZORRO_BASE_URL`, `PROZORRO_FEED_PAGES`, and `PROZORRO_FEED_LIMIT` control the live feed scan.
 
 ## D1 Schema
 
@@ -55,6 +60,13 @@ There is no user authentication yet. The production app distinguishes users with
 
 This preserves the current progressive UI behavior while avoiding long blocking HTTP requests.
 
+## ProZorro Agent Flow
+
+1. `POST /agents/tender-intel-agent/{companyId}/onboard` stores the company website, LinkedIn URL, inferred business profile, CPV prefixes, Ukrainian semantic keywords, false-positive keywords, and minimum value threshold in the agent state.
+2. `POST /agents/tender-intel-agent/{companyId}/search` walks the ProZorro public feed newest-first, keeps only `active.tendering` records, fetches tender details, filters by CPV/value, scores semantic fit, and stores the latest 25 matches.
+3. `GET /agents/tender-intel-agent/{companyId}/matches` returns the last scored matches.
+4. `POST /agents/tender-intel-agent/{companyId}/schedule-daily` schedules a daily 08:00 scan through the Agents SDK scheduling API.
+
 ## CI/CD
 
 `.github/workflows/deploy-cloudflare.yml` runs on pushes to `main` and manually through `workflow_dispatch`.
@@ -72,7 +84,17 @@ The GitHub repository must define these secrets:
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_API_TOKEN`
 
-The token needs enough Cloudflare permissions to deploy Workers, apply D1 migrations, use Workers AI, and manage the configured custom domain route.
+Create the token as a custom Cloudflare API token scoped to the production account and, for the custom domain, the `tendermatch.uk` zone. The current deployment needs these permissions:
+
+- Account / Workers Scripts / Edit
+- Account / D1 / Edit
+- Account / Workers AI / Edit
+- Zone / Workers Routes / Edit
+- Zone / Zone / Read
+
+If GitHub Actions fails with `Authentication error [code: 10000]` while calling `/workers/services/gtm-hack-tender-discovery`, the workflow secrets are being passed to Wrangler, but the token is missing permission for that Cloudflare operation, is scoped to the wrong account or zone, or has expired.
+
+Replace `CLOUDFLARE_API_TOKEN` with a token that has the policy above. Keep `CLOUDFLARE_ACCOUNT_ID` set even though the workflow also validates it; this prevents Wrangler from trying to discover account IDs with user-level token permissions.
 
 ## Domain Setup
 

@@ -1,13 +1,15 @@
-import { z } from "zod";
+import { routeAgentRequest } from "agents";
 import type { SearchProgress, SearchResponse, Tender, TenderMatch } from "../../shared/tender.js";
 import { FindTenderClient } from "../../server/src/clients/findTenderClient.js";
 import { extractKeyTerms } from "../../server/src/utils/text.js";
 import { tenderToSearchText } from "../../server/src/utils/tenderText.js";
+export { TenderIntelAgent } from "./agents/tenderIntelAgent.js";
 
 export interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
   AI: Ai;
+  TenderIntelAgent: DurableObjectNamespace;
   FIND_TENDER_BASE_URL?: string;
   FIND_TENDER_LOOKBACK_DAYS?: string;
   FIND_TENDER_PAGE_LIMIT?: string;
@@ -16,6 +18,10 @@ export interface Env {
   USE_MOCK_PROCUREMENT_API?: string;
   EMBEDDING_BATCH_SIZE?: string;
   WORKERS_AI_EMBEDDING_MODEL?: string;
+  TENDER_INTEL_LLM_MODEL?: string;
+  PROZORRO_BASE_URL?: string;
+  PROZORRO_FEED_PAGES?: string;
+  PROZORRO_FEED_LIMIT?: string;
 }
 
 type VectorRecordType = "business-profile" | "tender";
@@ -110,24 +116,6 @@ interface OnboardingProfileRow {
   updated_at: string;
 }
 
-const browserSessionIdSchema = z
-  .string()
-  .trim()
-  .min(16)
-  .max(128)
-  .regex(/^[a-zA-Z0-9_-]+$/);
-
-const requestSchema = z.object({
-  browserSessionId: browserSessionIdSchema.optional(),
-  businessSpecification: z.string().trim().min(20).max(12000)
-});
-
-const profileSchema = z.object({
-  browserSessionId: browserSessionIdSchema,
-  companyWebsite: z.string().trim().url().max(2048),
-  linkedinUrl: z.string().trim().url().max(2048)
-});
-
 const DEFAULT_BASE_URL = "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages";
 const DEFAULT_LOOKBACK_DAYS = 120;
 const DEFAULT_PAGE_LIMIT = 100;
@@ -157,6 +145,77 @@ function jsonResponse(payload: unknown, init?: ResponseInit): Response {
       ...init?.headers
     }
   });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isValidBrowserSessionId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-zA-Z0-9_-]{16,128}$/.test(value.trim());
+}
+
+function normalizeString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function isValidUrl(value: string): boolean {
+  if (value.length === 0 || value.length > 2048) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function parseSearchRequest(value: unknown): CreateSearchJobInput | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const businessSpecification = normalizeString(value.businessSpecification);
+  const browserSessionId = normalizeString(value.browserSessionId);
+
+  if (businessSpecification.length < 20 || businessSpecification.length > 12000) {
+    return null;
+  }
+
+  if (browserSessionId && !isValidBrowserSessionId(browserSessionId)) {
+    return null;
+  }
+
+  return {
+    ...(browserSessionId ? { browserSessionId } : {}),
+    businessSpecification,
+    queryTerms: [],
+    source: "mock",
+    sourceWarnings: [],
+    tenders: []
+  };
+}
+
+function parseProfileRequest(value: unknown): OnboardingProfile | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const browserSessionId = normalizeString(value.browserSessionId);
+  const companyWebsite = normalizeString(value.companyWebsite);
+  const linkedinUrl = normalizeString(value.linkedinUrl);
+
+  if (!isValidBrowserSessionId(browserSessionId) || !isValidUrl(companyWebsite) || !isValidUrl(linkedinUrl)) {
+    return null;
+  }
+
+  return {
+    browserSessionId,
+    companyWebsite,
+    linkedinUrl
+  };
 }
 
 function createFindTenderClient(env: Env): FindTenderClient {
@@ -740,9 +799,9 @@ function createManagers(env: Env): {
 }
 
 async function handleProfileCreate(request: Request, env: Env): Promise<Response> {
-  const parsed = profileSchema.safeParse(await request.json().catch(() => null));
+  const parsed = parseProfileRequest(await request.json().catch(() => null));
 
-  if (!parsed.success) {
+  if (!parsed) {
     return jsonResponse(
       {
         error: "Please provide a valid browserSessionId, companyWebsite, and linkedinUrl."
@@ -752,7 +811,7 @@ async function handleProfileCreate(request: Request, env: Env): Promise<Response
   }
 
   const { storage } = createManagers(env);
-  await storage.upsertOnboardingProfile(parsed.data);
+  await storage.upsertOnboardingProfile(parsed);
 
   return jsonResponse({
     status: "ok"
@@ -761,11 +820,9 @@ async function handleProfileCreate(request: Request, env: Env): Promise<Response
 
 async function handleProfileGet(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const parsedSessionId = browserSessionIdSchema.safeParse(
-    url.searchParams.get("browserSessionId") ?? request.headers.get("x-browser-session-id")
-  );
+  const browserSessionId = normalizeString(url.searchParams.get("browserSessionId") ?? request.headers.get("x-browser-session-id"));
 
-  if (!parsedSessionId.success) {
+  if (!isValidBrowserSessionId(browserSessionId)) {
     return jsonResponse(
       {
         error: "Please provide a valid browserSessionId."
@@ -775,7 +832,7 @@ async function handleProfileGet(request: Request, env: Env): Promise<Response> {
   }
 
   const { storage } = createManagers(env);
-  const profile = await storage.getOnboardingProfile(parsedSessionId.data);
+  const profile = await storage.getOnboardingProfile(browserSessionId);
 
   if (!profile) {
     return jsonResponse(
@@ -790,9 +847,9 @@ async function handleProfileGet(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleSearchCreate(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const parsed = requestSchema.safeParse(await request.json().catch(() => null));
+  const parsed = parseSearchRequest(await request.json().catch(() => null));
 
-  if (!parsed.success) {
+  if (!parsed) {
     return jsonResponse(
       {
         error: "Please provide a businessSpecification between 20 and 12,000 characters."
@@ -801,7 +858,7 @@ async function handleSearchCreate(request: Request, env: Env, ctx: ExecutionCont
     );
   }
 
-  const queryTerms = extractKeyTerms(parsed.data.businessSpecification);
+  const queryTerms = extractKeyTerms(parsed.businessSpecification);
 
   if (queryTerms.length === 0) {
     return jsonResponse(
@@ -818,8 +875,8 @@ async function handleSearchCreate(request: Request, env: Env, ctx: ExecutionCont
   const { searchJobs } = createManagers(env);
   const payload = await searchJobs.create(
     {
-      ...(parsed.data.browserSessionId ? { browserSessionId: parsed.data.browserSessionId } : {}),
-      businessSpecification: parsed.data.businessSpecification,
+      ...(parsed.browserSessionId ? { browserSessionId: parsed.browserSessionId } : {}),
+      businessSpecification: parsed.businessSpecification,
       queryTerms,
       source: result.source,
       sourceWarnings: result.warnings,
@@ -892,6 +949,11 @@ export default {
     const url = new URL(request.url);
 
     try {
+      const agentResponse = await routeAgentRequest(request, env);
+      if (agentResponse) {
+        return agentResponse;
+      }
+
       if (url.pathname.startsWith("/api/")) {
         return await handleApiRequest(request, env, ctx);
       }

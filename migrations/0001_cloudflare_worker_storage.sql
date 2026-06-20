@@ -15,6 +15,7 @@ CREATE INDEX IF NOT EXISTS vector_records_lookup_idx
 
 CREATE TABLE IF NOT EXISTS search_jobs (
   id TEXT PRIMARY KEY,
+  browser_session_id TEXT,
   status TEXT NOT NULL CHECK (status IN ('processing', 'complete', 'failed')),
   business_specification TEXT NOT NULL,
   business_profile_hash TEXT NOT NULL,
