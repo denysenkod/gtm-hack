@@ -3,7 +3,6 @@ import { mockFindTenderResponse } from "../data/mockFindTenderResponse.js";
 import { ProcurementApiError } from "../errors.js";
 import type { OcdsReleasePackage } from "../types/ocds.js";
 import { addDays, toIsoDateTimeSeconds } from "../utils/dates.js";
-import { scoreTextAgainstTerms } from "../utils/text.js";
 import { normalizeOcdsReleases } from "../normalizers/ocds.js";
 
 export interface TenderSearchResult {
@@ -105,37 +104,8 @@ async function fetchJsonWithTimeout(url: URL, timeoutMs: number): Promise<OcdsRe
   }
 }
 
-function scoreTender(tender: Tender, terms: string[]): number {
-  const searchableText = [
-    tender.title,
-    tender.buyerName,
-    tender.description,
-    tender.documentationUrls.join(" ")
-  ].join("\n");
-
-  return scoreTextAgainstTerms(searchableText, terms);
-}
-
-function filterAndRankTenders(tenders: Tender[], terms: string[]): Tender[] {
-  const ranked = tenders
-    .map((tender) => ({
-      tender,
-      score: scoreTender(tender, terms)
-    }))
-    .filter(({ score }) => score > 0)
-    .sort((left, right) => {
-      if (right.score !== left.score) {
-        return right.score - left.score;
-      }
-
-      return Date.parse(left.tender.deadlineDate) - Date.parse(right.tender.deadlineDate);
-    });
-
-  return ranked.map(({ tender }) => tender);
-}
-
-function normalizePackage(response: OcdsReleasePackage, terms: string[]): Tender[] {
-  return filterAndRankTenders(normalizeOcdsReleases(response.releases ?? []), terms);
+function normalizePackage(response: OcdsReleasePackage): Tender[] {
+  return normalizeOcdsReleases(response.releases ?? []);
 }
 
 async function fetchReleasePackages(options: FindTenderClientOptions): Promise<OcdsReleasePackage[]> {
@@ -159,18 +129,18 @@ export class FindTenderClient {
     this.options = options;
   }
 
-  async search(terms: string[]): Promise<TenderSearchResult> {
+  async search(): Promise<TenderSearchResult> {
     if (this.options.useMock) {
       return {
         source: "mock",
-        tenders: normalizePackage(mockFindTenderResponse, terms),
+        tenders: normalizePackage(mockFindTenderResponse),
         warnings: ["Using mock procurement data because USE_MOCK_PROCUREMENT_API is enabled."]
       };
     }
 
     try {
       const releasePackages = await fetchReleasePackages(this.options);
-      const tenders = releasePackages.flatMap((releasePackage) => normalizePackage(releasePackage, terms));
+      const tenders = releasePackages.flatMap((releasePackage) => normalizePackage(releasePackage));
 
       return {
         source: "find-a-tender",
@@ -178,9 +148,7 @@ export class FindTenderClient {
         warnings:
           tenders.length > 0
             ? []
-            : [
-                "The live source returned records, but none matched the extracted terms. Try adding sector, buyer, technology, and delivery keywords."
-              ]
+            : ["The live source returned no candidate tender records for the configured time window."]
       };
     } catch (error) {
       const message =
@@ -190,7 +158,7 @@ export class FindTenderClient {
 
       return {
         source: "mock",
-        tenders: normalizePackage(mockFindTenderResponse, terms),
+        tenders: normalizePackage(mockFindTenderResponse),
         warnings: [`${message} Showing typed mock data with the same OCDS shape.`]
       };
     }

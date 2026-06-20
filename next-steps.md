@@ -18,8 +18,8 @@ To transition this basic matching system into an enterprise-grade B2G intelligen
 #### Phase 2: MVP Improvements (Semantic & Intelligence Upgrades)
 
 * **Vector Embeddings Search Integration:**
-* *Implementation:* Replace basic keyword tokens with dense vector representations. Generate embeddings using an external model (e.g., OpenAI's `text-embedding-3-small` or local HuggingFace transformers).
-* *Storage:* Streamline results by indexing both the user profile and incoming tender text into a vector database (such as pgvector, Chroma, or Pinecone), executing **cosine similarity** queries to surface contextually matched opportunities.
+* *Implementation:* Replace basic keyword tokens with dense vector representations. Generate embeddings using local HuggingFace transformers.
+* *Storage:* Streamline results by indexing both the user profile and incoming tender text into a vector database (such as pgvector, Chroma, or Pinecone), executing **cosine similarity** queries to surface contextually matched opportunities. 
 
 
 * **Automated Document Scraping & Parsing:** Build a worker pipeline that automatically downloads the underlying PDF/DOCX tender attachments (which contain the real technical requirements) and runs them through an OCR/Text Extraction layer (e.g., AWS Textract or LangChain Document Loaders).

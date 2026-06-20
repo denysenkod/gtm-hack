@@ -1,0 +1,1 @@
+When implementing a feature which uses a complex external API or an external library, create a new .md file in docs/ which outlines the design decision that were made and how it is implemented now

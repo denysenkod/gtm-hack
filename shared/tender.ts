@@ -11,9 +11,15 @@ export interface Tender {
   status: "active" | "closed";
 }
 
+export interface TenderMatch extends Tender {
+  matchScore: number;
+  matchQuality: "high" | "medium" | "low";
+}
+
 export interface SearchResponse {
   queryTerms: string[];
+  businessProfileHash: string;
   source: "find-a-tender" | "mock";
-  tenders: Tender[];
+  tenders: TenderMatch[];
   warnings: string[];
 }

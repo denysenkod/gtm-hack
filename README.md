@@ -27,7 +27,9 @@ Content-Type: application/json
 }
 ```
 
-The backend extracts key terms, queries Find a Tender OCDS releases, normalizes matching records into the shared `Tender` interface, and sorts active tenders by nearest deadline. If the upstream source rate-limits, times out, or is unavailable, the server returns realistic mock OCDS data with a warning.
+The backend queries Find a Tender OCDS releases, normalizes candidate records into the shared `Tender` interface, embeds the business profile and tender text with local Hugging Face Transformers, stores vectors in `.data/vector-store.json`, and ranks active tenders by cosine similarity. If the upstream source rate-limits, times out, or is unavailable, the server returns realistic mock OCDS data with a warning.
+
+Embeddings are cached by normalized text hash plus model name. Unchanged tender text reuses its existing vector, and the business profile vector is only regenerated when the submitted description changes.
 
 ## Useful Environment Variables
 
@@ -38,6 +40,14 @@ The backend extracts key terms, queries Find a Tender OCDS releases, normalizes 
 - `FIND_TENDER_LOOKBACK_DAYS`: Live API lookback window, defaults to `120`
 - `FIND_TENDER_PAGE_LIMIT`: Live API page size, defaults to `100`
 - `FIND_TENDER_MAX_PAGES`: Live API pages to inspect, defaults to `2`
+- `EMBEDDING_MODEL_NAME`: Local Transformers.js model, defaults to `Xenova/all-MiniLM-L6-v2`
+- `EMBEDDING_DEVICE`: Embedding execution device. Defaults to the platform GPU backend: `dml` on Windows, `cuda` on Linux, `coreml` on macOS.
+- `TRANSFORMERS_CACHE_DIR`: Model cache directory, defaults to `.data/transformers-cache`
+- `TRANSFORMERS_ALLOW_REMOTE_MODELS=false`: Require the embedding model to already exist in the local cache
+- `VECTOR_STORE_PATH`: Persisted vector database path, defaults to `.data/vector-store.json`
+- `SERVER_LOG_PATH`: Server progress log file, defaults to `.data/server.log`
+
+Embedding progress, selected device, cache hits, vector indexing progress, and final match summaries are written to the server log file as well as stdout.
 
 ## Verification
 

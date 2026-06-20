@@ -1,5 +1,5 @@
 import { FormEvent, useMemo, useState } from "react";
-import type { SearchResponse, Tender } from "../../shared/tender";
+import type { SearchResponse, TenderMatch } from "../../shared/tender";
 
 const exampleSpecification =
   "We deliver secure cloud software, workflow automation, CRM integration, data migration, analytics dashboards, and support for public sector health and local government teams.";
@@ -82,7 +82,23 @@ function deadlineLabel(days: number | null): string {
   return `${days} days left`;
 }
 
-function TenderCard({ tender }: { tender: Tender }) {
+function matchTone(quality: TenderMatch["matchQuality"]): string {
+  if (quality === "high") {
+    return "border-moss bg-mist text-moss";
+  }
+
+  if (quality === "medium") {
+    return "border-amber-400 bg-amber-50 text-amber-800";
+  }
+
+  return "border-slate-300 bg-slate-50 text-slate-700";
+}
+
+function formatMatchScore(score: number): string {
+  return `${Math.round(score * 100)}%`;
+}
+
+function TenderCard({ tender }: { tender: TenderMatch }) {
   const days = daysUntil(tender.deadlineDate);
   const strictWarning = days !== null && days <= 7 && days >= 0;
 
@@ -97,6 +113,9 @@ function TenderCard({ tender }: { tender: Tender }) {
             <span className={`rounded border px-2 py-1 text-xs font-semibold ${deadlineTone(days)}`}>
               {deadlineLabel(days)}
             </span>
+            <span className={`rounded border px-2 py-1 text-xs font-semibold ${matchTone(tender.matchQuality)}`}>
+              {tender.matchQuality} match
+            </span>
           </div>
           <h2 className="text-lg font-semibold leading-snug text-ink">{tender.title}</h2>
           <p className="mt-2 text-sm font-medium text-slate-700">{tender.buyerName}</p>
@@ -106,6 +125,9 @@ function TenderCard({ tender }: { tender: Tender }) {
           <span className="text-sm text-slate-500">Estimated value</span>
           <span className="text-lg font-semibold text-ink">
             {formatCurrency(tender.value, tender.currency)}
+          </span>
+          <span className="text-sm font-semibold text-moss">
+            {formatMatchScore(tender.matchScore)} match quality
           </span>
           <span className="text-sm text-slate-500">{formatDate(tender.deadlineDate)}</span>
         </div>
@@ -126,6 +148,10 @@ function TenderCard({ tender }: { tender: Tender }) {
           <div>
             <dt className="font-semibold text-slate-500">Deadline date</dt>
             <dd className="mt-1 text-ink">{formatDate(tender.deadlineDate)}</dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-slate-500">Cosine match score</dt>
+            <dd className="mt-1 text-ink">{formatMatchScore(tender.matchScore)}</dd>
           </div>
           <div>
             <dt className="font-semibold text-slate-500">Buyer</dt>
@@ -183,11 +209,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  const sortedTenders = useMemo(() => {
-    return [...(results?.tenders ?? [])].sort((left, right) => {
-      return Date.parse(left.deadlineDate) - Date.parse(right.deadlineDate);
-    });
-  }, [results]);
+  const rankedTenders = useMemo(() => results?.tenders ?? [], [results]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -237,7 +259,7 @@ export default function App() {
             </div>
             <div className="flex items-center justify-between gap-3">
               <span className="text-sm font-semibold text-slate-600">Matches</span>
-              <span className="text-sm font-semibold text-ink">{sortedTenders.length}</span>
+              <span className="text-sm font-semibold text-ink">{rankedTenders.length}</span>
             </div>
           </div>
         </div>
@@ -279,6 +301,9 @@ export default function App() {
                   </span>
                 ))}
               </div>
+              <p className="mt-4 break-all text-xs leading-5 text-slate-500">
+                Profile vector: {results.businessProfileHash.slice(0, 16)}
+              </p>
             </div>
           ) : null}
         </aside>
@@ -306,9 +331,9 @@ export default function App() {
                 Searching procurement notices
               </div>
             </div>
-          ) : sortedTenders.length > 0 ? (
+          ) : rankedTenders.length > 0 ? (
             <div className="grid gap-4">
-              {sortedTenders.map((tender) => (
+              {rankedTenders.map((tender) => (
                 <TenderCard key={tender.id} tender={tender} />
               ))}
             </div>
