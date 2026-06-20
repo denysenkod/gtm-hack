@@ -1,0 +1,47 @@
+# B2G Tender Discovery Prototype
+
+TypeScript prototype for matching a business profile against public procurement notices from the UK Find a Tender OCDS release package API.
+
+## Run Locally
+
+```bash
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`.
+
+The dev script starts:
+
+- Express API on `http://127.0.0.1:8787`
+- Vite frontend on `http://127.0.0.1:5173`
+
+## Search API
+
+```http
+POST /api/search
+Content-Type: application/json
+
+{
+  "businessSpecification": "We deliver secure cloud software, workflow automation, CRM integration, data migration, analytics dashboards, and public sector support."
+}
+```
+
+The backend extracts key terms, queries Find a Tender OCDS releases, normalizes matching records into the shared `Tender` interface, and sorts active tenders by nearest deadline. If the upstream source rate-limits, times out, or is unavailable, the server returns realistic mock OCDS data with a warning.
+
+## Useful Environment Variables
+
+- `PORT`: Backend port, defaults to `8787`
+- `CLIENT_ORIGIN`: Allowed CORS origin, defaults to `http://127.0.0.1:5173`
+- `USE_MOCK_PROCUREMENT_API=true`: Force deterministic mock data
+- `PROCUREMENT_API_TIMEOUT_MS`: Upstream timeout, defaults to `8000`
+- `FIND_TENDER_LOOKBACK_DAYS`: Live API lookback window, defaults to `120`
+- `FIND_TENDER_PAGE_LIMIT`: Live API page size, defaults to `100`
+- `FIND_TENDER_MAX_PAGES`: Live API pages to inspect, defaults to `2`
+
+## Verification
+
+```bash
+npm run typecheck
+npm run build
+```
