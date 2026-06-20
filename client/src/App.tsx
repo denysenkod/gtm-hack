@@ -763,20 +763,6 @@ export default function App() {
 
   return (
     <main className="min-h-screen bg-[#eceeed] text-[#13201a]">
-      <div className="sticky top-0 z-50 bg-[#0f1c16] shadow-[0_1px_0_rgba(255,255,255,0.06)]">
-        <div className="mx-auto flex max-w-[1320px] items-center gap-6 px-5 py-3 sm:px-8 xl:px-12">
-          <div className="flex items-center gap-3">
-            <div className="grid h-[22px] w-[22px] place-items-center rounded-md bg-[#1f7a4d] text-xs font-extrabold text-white">
-              T
-            </div>
-            <span className="text-sm font-bold tracking-[0.01em] text-white">Tender Discovery</span>
-          </div>
-          <span className="hidden text-[12.5px] font-medium text-white/40 sm:inline">
-            refined opportunity console
-          </span>
-        </div>
-      </div>
-
       <div className="mx-auto max-w-[1320px] px-5 py-10 sm:px-8 xl:px-12 xl:py-11">
         <header className="mb-10 flex flex-col justify-between gap-8 lg:flex-row lg:items-start">
           <div className="max-w-[740px]">
@@ -809,7 +795,7 @@ export default function App() {
         </header>
 
         <div className="grid gap-8 lg:grid-cols-[380px_minmax(0,1fr)]">
-          <aside className="lg:sticky lg:top-[92px] lg:self-start">
+          <aside className="lg:sticky lg:top-8 lg:self-start">
             <div className="flex flex-col gap-[18px]">
               <form
                 className="rounded-2xl border border-[#e4e7e5] bg-white p-6 shadow-[0_1px_2px_rgba(16,28,22,0.04)]"
